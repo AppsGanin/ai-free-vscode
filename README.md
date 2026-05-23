@@ -2,6 +2,7 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/AppsGanin/ai-free-vscode.svg)](https://github.com/AppsGanin/ai-free-vscode/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/AppsGanin/ai-free-vscode.svg)](https://github.com/AppsGanin/ai-free-vscode/network)
+[![GitHub watchers](https://img.shields.io/github/watchers/AppsGanin/ai-free-vscode.svg?style=social)](https://github.com/AppsGanin/ai-free-vscode/watchers)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![VS Code](https://img.shields.io/badge/VS_Code-%5E1.103.0-success.svg)](https://code.visualstudio.com)
 [![Last Commit](https://img.shields.io/github/last-commit/AppsGanin/ai-free-vscode.svg)](https://github.com/AppsGanin/ai-free-vscode/commits/main)
@@ -34,6 +35,7 @@ Sign in once. Use forever.
 ## 🔧 How It Works
 
 **Flow:**
+
 1. User selects a model in Copilot Chat
 2. Request routed to appropriate provider
 3. Playwright loads stored browser session with cookies
@@ -58,13 +60,14 @@ Sign in once. Use forever.
 5. The model is now available in Copilot Chat — select it from the model picker.
 
 To sign out run **AI Free VSCode: "Provider": Sign Out**.
+
 ## Configuration
 
 | Setting                | Default | Description                             |
 | ---------------------- | ------- | --------------------------------------- |
 | `ai-free-vscode.debug` | `false` | Enable debug logging to VS Code console |
 
-*AI Free VSCode in action within VS Code Copilot Chat*
+_AI Free VSCode in action within VS Code Copilot Chat_
 
 ## ⚙️ Requirements
 
@@ -75,24 +78,31 @@ To sign out run **AI Free VSCode: "Provider": Sign Out**.
 ## ❓ FAQ
 
 ### Why is this free?
+
 We use your existing free LLM provider account through Playwright browser session. No API keys or paid subscriptions.
 
 ### Is it safe?
+
 Authentication happens through a real browser. Session stored locally only with you. We don't store your credentials.
 
 ### Does this work permanently?
+
 May stop working if the LLM provider changes their authentication or APIs. Project maintained by enthusiasts.
 
 ### Can I use my corporate account?
+
 Yes, but make sure it's allowed by your company policy.
 
 ### Are there message limits?
+
 Depends on your free tier on the website. Usually very high or unlimited.
 
 ### Can I use multiple accounts?
+
 No, extension supports one active session at a time. To switch, sign out and in again.
 
 ### How do I update?
+
 Download the latest VSIX from Releases and install it over the existing extension.
 
 ## 🏗 Development
@@ -147,6 +157,7 @@ Crypto wallets:
 Contributions are welcome! Please read our [Contribution Guide](CONTRIBUTING.md) first.
 
 Some areas where you can help:
+
 - Fix bugs (see [open issues](https://github.com/AppsGanin/ai-free-vscode/issues))
 - Improve documentation
 - Add new AI models or providers
@@ -160,12 +171,6 @@ Some areas where you can help:
 - **Browser Automation**: Playwright
 - **Streaming**: Server-Sent Events (SSE)
 - **Package Manager**: npm
-
-## 📈 Stats
-
-[![GitHub stars](https://img.shields.io/github/stars/AppsGanin/ai-free-vscode.svg?style=social)](https://github.com/AppsGanin/ai-free-vscode/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/AppsGanin/ai-free-vscode.svg?style=social)](https://github.com/AppsGanin/ai-free-vscode/network)
-[![GitHub watchers](https://img.shields.io/github/watchers/AppsGanin/ai-free-vscode.svg?style=social)](https://github.com/AppsGanin/ai-free-vscode/watchers)
 
 ## ⚠️ Legal Disclaimer
 
