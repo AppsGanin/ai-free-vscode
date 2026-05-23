@@ -176,14 +176,6 @@ Some areas where you can help:
 
 This extension is an independent, unofficial tool and is not affiliated with, endorsed by, or sponsored by any AI provider.
 
-**Use at your own risk.** Automating web sessions may violate the Terms of Service of the respective platforms. Your account may be rate-limited, restricted, or banned as a result.
-
-Always check the Terms of Service of the platforms you use.
-
-## Disclaimer
-
-This extension is an independent, unofficial tool and is not affiliated with, endorsed by, or sponsored by any AI provider.
-
 - **Use at your own risk.** Automating web sessions may violate the Terms of Service of the respective platforms. Your account may be rate-limited, restricted, or banned as a result.
 - **No guarantees.** The extension may stop working at any time if providers change their APIs, authentication flows, or access policies.
 - **No liability.** The authors are not responsible for any consequences arising from the use of this extension, including but not limited to account suspension, data loss, or service interruptions.
