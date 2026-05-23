@@ -87,6 +87,19 @@ Roughly half the code was written using this extension itself — a fitting feed
 
 If you'd like to fix something, add a feature, or improve the integration — contributions and collaboration are very welcome. Open an issue or send a PR.
 
+## Support / Donate
+
+If you find this useful and want to support development, any donation is appreciated.
+
+Crypto wallets:
+
+| Network | Token | Address                                            |
+| ------- | ----- | -------------------------------------------------- |
+| TRC20   | USDT  | `TJwyrPVEZVZ1YrcmDiZTyFjLo3Q2DmEGzs`               |
+| ERC20   | USDT  | `0xf9d663146ce902da91911b214c71cc73a5269d1d`       |
+| Solana  | USDT  | `2qAZRTbaUMTfYuZbD1dCYHjkYgxkw4dUYE9XY3JhC2Cs`     |
+| TON     | USDT  | `UQDoat731MLYuIw8ayL3Vhhw7zTBbLvRaQFmDvab--CNNI7e` |
+
 ## License
 
 MIT
