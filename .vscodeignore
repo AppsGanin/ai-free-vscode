@@ -3,4 +3,6 @@
 .gitignore
 *.log
 node_modules/.cache
+.idea
+.vscode
 ~/.ai-free-vscode
