@@ -54,6 +54,7 @@ export async function runComplete({
   onText,
   signal,
   threadKey,
+  messagesCount,
 }) {
   // Validate authentication
   if (!auth?.cookieHeader && !auth?.token) {
@@ -98,6 +99,11 @@ export async function runComplete({
 
   const params = MODEL_PARAMS[modelId] ?? MODEL_PARAMS["deepseek-default"];
   const cacheKey = threadKey ?? modelId;
+
+  // First message of a new VS Code thread — always start a fresh DeepSeek session
+  if (messagesCount === 1) {
+    sessionIdCache.delete(cacheKey);
+  }
 
   /**
    * Attempt completion with the given sessionId.

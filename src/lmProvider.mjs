@@ -152,6 +152,7 @@ class AiFreeVscodeChatModelProvider {
       .join("")
       .slice(0, 64);
     const threadKey = `${model.id}:${firstContent}`;
+    const messagesCount = messages.length;
     const abort = tokenToAbort(token);
     const hasTools = tools.length > 0;
     let fullText = "";
@@ -285,6 +286,7 @@ class AiFreeVscodeChatModelProvider {
             onText,
             signal: abort.signal,
             threadKey,
+            messagesCount,
           });
           break;
 
@@ -297,6 +299,7 @@ class AiFreeVscodeChatModelProvider {
             onThinking,
             signal: abort.signal,
             threadKey,
+            messagesCount,
           });
           break;
 
@@ -362,6 +365,12 @@ class AiFreeVscodeChatModelProvider {
     // Text was already streamed above; only emit tool calls here.
     if (hasTools) {
       const toolCalls = parseToolCalls(fullText);
+      if (toolCalls.length === 0 && fullText.includes("tool_call")) {
+        console.error(
+          `[ai-free-vscode] WARNING: tool_call detected in fullText but parseToolCalls returned 0. fullText snippet: ${fullText.slice(0, 300)}`,
+        );
+      }
+      console.error(`[ai-free-vscode] parsed ${toolCalls.length} tool call(s)`);
       for (const tc of toolCalls) {
         let input = {};
         try {

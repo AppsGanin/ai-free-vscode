@@ -248,6 +248,15 @@ export function parseToolCalls(text) {
     if (parsed?.name) pushCall(parsed.name, extractArgs(parsed));
   }
 
+  // Bare tool_call without backticks:
+  //   tool_call\n{...}   or   \ntool_call\n{...}
+  // (model sometimes omits the ``` fence)
+  const bareToolCallRe = /(?:^|\n)tool_call\s*\n(\{[\s\S]*?\})\s*(?=\n|$)/g;
+  while ((m = bareToolCallRe.exec(text)) !== null) {
+    const parsed = tryJson(m[1]);
+    if (parsed?.name) pushCall(parsed.name, extractArgs(parsed));
+  }
+
   // ```json\n{"name":..., "arguments":...}\n```  (only when name/tool field present)
   const jsonBlockRe = /```json\s*([\s\S]*?)```/g;
   while ((m = jsonBlockRe.exec(text)) !== null) {

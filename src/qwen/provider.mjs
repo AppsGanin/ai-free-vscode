@@ -87,6 +87,7 @@ export async function runComplete({
   onThinking,
   signal,
   threadKey,
+  messagesCount,
 }) {
   if (!auth?.token) {
     const err = new Error(
@@ -100,7 +101,14 @@ export async function runComplete({
   const apiModel = MODEL_PARAMS[modelId]?.apiName ?? "qwen-max-latest";
   const cacheKey = threadKey ?? modelId;
 
-  console.debug(`[qwen] apiModel=${apiModel} cacheKey=${cacheKey}`);
+  console.debug(
+    `[qwen] apiModel=${apiModel} cacheKey=${cacheKey} messagesCount=${messagesCount}`,
+  );
+
+  // First message of a new VS Code thread — always start a fresh Qwen chat
+  if (messagesCount === 1) {
+    chatIdCache.delete(cacheKey);
+  }
 
   // Try cached chatId first, fall back to creating a new chat on failure
   const cachedChatId = chatIdCache.get(cacheKey);
