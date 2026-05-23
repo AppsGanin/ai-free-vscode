@@ -26,7 +26,7 @@ Sign in once. Use forever.
 
 ## Installation
 
-1. Go to the [Releases](../../releases) page and download the latest `ai-free-vscode-*.vsix`.
+1. Go to the [Releases](https://github.com/AppsGanin/ai-free-vscode/releases) page and download the latest `ai-free-vscode-*.vsix`.
 2. In VS Code: **Extensions** panel → `···` menu → **Install from VSIX...** → select the file.
 3. Reload VS Code when prompted.
 

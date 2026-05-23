@@ -2,7 +2,11 @@
   "name": "ai-free-vscode",
   "displayName": "AI Free VSCode",
   "version": "0.0.1",
-  "private": true,
+  "private": false,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AppsGanin/ai-free-vscode"
+  },
   "type": "module",
   "icon": "media/icon.png",
   "description": "Free AI models in Copilot Chat via browser authentication. No API keys required.",
