@@ -56,8 +56,8 @@ To sign out run **AI Free VSCode: DeepSeek: Sign Out** / **AI Free VSCode: Qwen:
 ## Development
 
 ```bash
-git clone https://github.com/yourusername/ai-free-api
-cd ai-free-api
+git clone https://github.com/AppsGanin/ai-free-vscode
+cd ai-free-vscode
 npm install   # also downloads Playwright Chromium
 ```
 
