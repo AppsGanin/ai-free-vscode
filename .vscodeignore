@@ -1,0 +1,6 @@
+# Файлы, исключаемые при упаковке расширения
+.git
+.gitignore
+*.log
+node_modules/.cache
+~/.ai-free-vscode

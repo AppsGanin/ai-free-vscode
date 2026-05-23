@@ -1,0 +1,7 @@
+node_modules/
+.browser-profile/
+auth.json
+*.log
+.copilot-specs-cache/
+.idea/
+.vscode/

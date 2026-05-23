@@ -1,0 +1,119 @@
+{
+  "name": "ai-free-vscode",
+  "displayName": "AI Free VSCode",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "icon": "media/icon.png",
+  "description": "Free AI models in Copilot Chat via browser authentication. No API keys required.",
+  "publisher": "local",
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./src/extension.mjs",
+  "contributes": {
+    "configuration": {
+      "title": "AI Free VSCode",
+      "properties": {
+        "ai-free-vscode.debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable debug logging to console"
+        }
+      }
+    },
+    "languageModelChatProviders": [
+      {
+        "vendor": "ai-free-vscode",
+        "displayName": "AI Free VSCode",
+        "models": [
+          {
+            "id": "deepseek-default",
+            "name": "DeepSeek V4 (default)",
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "deepseek-expert",
+            "name": "DeepSeek V4 (expert)",
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen-max",
+            "name": "Qwen2.5-Max",
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen-plus",
+            "name": "Qwen3.6-Plus",
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen3-max",
+            "name": "Qwen3-Max",
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen-coder",
+            "name": "Qwen3-Coder",
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen-flash",
+            "name": "Qwen3.5-Flash (fast)",
+            "capabilities": {
+              "chat": true
+            }
+          }
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "deepseek.login",
+        "title": "AI Free VSCode: DeepSeek: Sign In (Playwright)"
+      },
+      {
+        "command": "deepseek.logout",
+        "title": "AI Free VSCode: DeepSeek: Sign Out"
+      },
+      {
+        "command": "qwen.login",
+        "title": "AI Free VSCode: Qwen: Sign In (Playwright)"
+      },
+      {
+        "command": "qwen.logout",
+        "title": "AI Free VSCode: Qwen: Sign Out"
+      }
+    ]
+  },
+  "scripts": {
+    "postinstall": "npx playwright install chromium",
+    "package": "vsce package --allow-missing-repository"
+  },
+  "enabledApiProposals": [
+    "chatProvider"
+  ],
+  "engines": {
+    "vscode": "^1.103.0",
+    "node": ">=18"
+  },
+  "dependencies": {
+    "playwright": "^1.60.0"
+  }
+}
