@@ -1,38 +1,8 @@
-import https from "node:https";
-import { URL } from "node:url";
+import { httpsRequest, readBody } from "../utils/https.mjs";
 import { BASE_URL, COMPLETION_PATH } from "./config.mjs";
 import { baseHeaders } from "./headers.mjs";
 import { solvePow } from "./pow.mjs";
 import { streamSseFromNodeResponse } from "./sse.mjs";
-
-/** Minimal https wrapper that bypasses VS Code's patched globalThis.fetch. */
-function httpsRequest(urlStr, method, headers, body, signal) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(urlStr);
-    const options = {
-      hostname: u.hostname,
-      port: u.port || 443,
-      path: u.pathname + (u.search || ""),
-      method,
-      headers,
-    };
-    const req = https.request(options, resolve);
-    req.on("error", reject);
-    if (signal) {
-      signal.addEventListener("abort", () =>
-        req.destroy(new Error("Request aborted")),
-      );
-    }
-    if (body !== undefined) req.write(body);
-    req.end();
-  });
-}
-
-async function readBody(res) {
-  const chunks = [];
-  for await (const chunk of res) chunks.push(chunk);
-  return Buffer.concat(chunks).toString("utf8");
-}
 
 export class DeepSeekClient {
   constructor({ cookieHeader, token, debug = false }) {
@@ -204,7 +174,13 @@ export class DeepSeekClient {
       );
     }
 
-    return streamSseFromNodeResponse(res, this.debug, onText);
+    return await streamSseFromNodeResponse(
+      res,
+      this.debug,
+      onText,
+      null,
+      signal,
+    );
   }
 }
 

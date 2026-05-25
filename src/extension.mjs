@@ -9,23 +9,20 @@
 import fs from "node:fs";
 import path from "node:path";
 import * as vscode from "vscode";
-import {
-  clearProfileSession,
-  loginAndSaveAuth,
-  readSavedAuth,
-} from "./deepseek/auth.mjs";
-import { AUTH_FILE } from "./deepseek/config.mjs";
 import { registerLmProvider } from "./lmProvider.mjs";
+import { getProvider } from "./providers/index.mjs";
 import {
-  clearProfileSession as clearQwenProfileSession,
-  loginAndSaveAuth as loginAndSaveQwenAuth,
-  AUTH_FILE as QWEN_AUTH_FILE,
-  readSavedAuth as readSavedQwenAuth,
-} from "./qwen/auth.mjs";
-import { setDebugMode } from "./utils/logger.mjs";
+  dispose as disposeLogger,
+  info,
+  initChannel,
+  error as logError,
+  setDebugMode,
+  setLevelFilter,
+  show as showLogs,
+} from "./utils/logger.mjs";
 
 /** @type {{ cookieHeader: string, token: string }} */
-export const auth = { cookieHeader: "", token: "" };
+export const deepseekAuth = { cookieHeader: "", token: "" };
 
 /** @type {{ token: string }} */
 export const qwenAuth = { token: "" };
@@ -42,20 +39,22 @@ export async function activate(context) {
     process.env.PLAYWRIGHT_BROWSERS_PATH = bundledBrowsersPath;
   }
 
-  // Load saved DeepSeek auth (if any)
+  // Load saved auth for all providers
+  const deepseekProvider = getProvider("deepseek");
+  const qwenProvider = getProvider("qwen");
+
   try {
-    const saved = readSavedAuth();
-    if (saved) {
-      auth.cookieHeader = saved.cookieHeader;
-      auth.token = saved.token;
+    const savedDeepseek = deepseekProvider.loadAuth();
+    if (savedDeepseek) {
+      deepseekAuth.cookieHeader = savedDeepseek.cookieHeader;
+      deepseekAuth.token = savedDeepseek.token;
     }
   } catch (e) {
     console.warn(`DeepSeek: failed to read saved auth: ${e?.message || e}`);
   }
 
-  // Load saved Qwen auth (if any)
   try {
-    const savedQwen = readSavedQwenAuth();
+    const savedQwen = qwenProvider.loadAuth();
     if (savedQwen) {
       qwenAuth.token = savedQwen.token;
     }
@@ -67,10 +66,10 @@ export async function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand("deepseek.login", async () => {
       try {
-        await clearProfileSession().catch(() => {});
-        const result = await loginAndSaveAuth();
-        auth.cookieHeader = result.cookieHeader;
-        auth.token = result.token;
+        await deepseekProvider.logout().catch(() => {});
+        const result = await deepseekProvider.login();
+        deepseekAuth.cookieHeader = result.auth.cookieHeader;
+        deepseekAuth.token = result.auth.token;
         vscode.window.showInformationMessage(
           "DeepSeek: signed in successfully!",
         );
@@ -85,11 +84,9 @@ export async function activate(context) {
   // Command: sign out of DeepSeek
   context.subscriptions.push(
     vscode.commands.registerCommand("deepseek.logout", () => {
-      auth.cookieHeader = "";
-      auth.token = "";
-      try {
-        fs.rmSync(AUTH_FILE, { force: true });
-      } catch {}
+      deepseekProvider.logout();
+      deepseekAuth.cookieHeader = "";
+      deepseekAuth.token = "";
       vscode.window.showInformationMessage("DeepSeek: signed out.");
     }),
   );
@@ -98,9 +95,9 @@ export async function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand("qwen.login", async () => {
       try {
-        await clearQwenProfileSession().catch(() => {});
-        const result = await loginAndSaveQwenAuth();
-        qwenAuth.token = result.token;
+        await qwenProvider.logout().catch(() => {});
+        const result = await qwenProvider.login();
+        qwenAuth.token = result.auth.token;
         vscode.window.showInformationMessage("Qwen: signed in successfully!");
       } catch (e) {
         vscode.window.showErrorMessage(`Qwen: sign-in failed — ${e.message}`);
@@ -111,13 +108,16 @@ export async function activate(context) {
   // Command: sign out of Qwen
   context.subscriptions.push(
     vscode.commands.registerCommand("qwen.logout", () => {
+      qwenProvider.logout();
       qwenAuth.token = "";
-      try {
-        fs.rmSync(QWEN_AUTH_FILE, { force: true });
-      } catch {}
       vscode.window.showInformationMessage("Qwen: signed out.");
     }),
   );
+
+  // Initialize logger — create Output Channel first so all subsequent logs go there
+  const logChannel = vscode.window.createOutputChannel("AI Free VSCode");
+  context.subscriptions.push(logChannel);
+  initChannel(logChannel);
 
   // Initialize logger with debug setting from config
   const debugConfig = vscode.workspace
@@ -125,18 +125,48 @@ export async function activate(context) {
     .get("ai-free-vscode.debug");
   setDebugMode(debugConfig);
 
+  // Optional log level filter from config (defaults to 'info' unless debug mode)
+  const levelFilter = vscode.workspace
+    .getConfiguration()
+    .get("ai-free-vscode.logLevel");
+  if (levelFilter) setLevelFilter(levelFilter);
+
+  info("AI Free VSCode extension activating");
+
+  // Status bar — shows which model is active during requests
+  const statusBar = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    100,
+  );
+  statusBar.command = "ai-free-vscode.showLogs";
+  statusBar.tooltip = "AI Free VSCode — click to show logs";
+  context.subscriptions.push(statusBar);
+
+  // Command: show logs in Output panel
+  context.subscriptions.push(
+    vscode.commands.registerCommand("ai-free-vscode.showLogs", () => {
+      showLogs();
+    }),
+  );
+
   // Register unified AI Free VSCode provider
   try {
-    registerLmProvider(context, auth, qwenAuth);
+    registerLmProvider(context, deepseekAuth, qwenAuth, statusBar);
   } catch (e) {
-    console.warn(
+    logError(
       `AI Free VSCode: failed to register language model provider: ${e?.message || e}`,
+    );
+    vscode.window.showErrorMessage(
+      'AI Free VSCode failed to activate. Run "AI Free VSCode: Show Logs" for details.',
     );
   }
 
+  info("AI Free VSCode extension activated");
   console.log("AI Free VSCode extension activated");
 }
 
 export function deactivate() {
+  info("AI Free VSCode extension deactivated");
+  disposeLogger();
   console.log("AI Free VSCode extension deactivated");
 }

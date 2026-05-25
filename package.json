@@ -1,7 +1,7 @@
 {
   "name": "ai-free-vscode",
   "displayName": "AI Free VSCode",
-  "version": "0.0.2",
+  "version": "0.1.0",
   "private": false,
   "repository": {
     "type": "git",
@@ -37,49 +37,160 @@
         "models": [
           {
             "id": "deepseek-default",
-            "name": "DeepSeek V4 (default)",
+            "name": "DeepSeek (default)",
+            "maxInputTokens": 131072,
             "capabilities": {
               "chat": true
             }
           },
           {
-            "id": "deepseek-expert",
-            "name": "DeepSeek V4 (expert)",
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen-max",
-            "name": "Qwen2.5-Max",
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen-plus",
+            "id": "qwen3.6-plus",
             "name": "Qwen3.6-Plus",
+            "maxInputTokens": 1000000,
             "capabilities": {
               "chat": true
             }
           },
           {
-            "id": "qwen3-max",
+            "id": "qwen3.6-max-preview",
+            "name": "Qwen3.6-Max-Preview",
+            "maxInputTokens": 262144,
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen3.6-plus-preview",
+            "name": "Qwen3.6-Plus-Preview",
+            "maxInputTokens": 1000000,
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen3.6-35b-a3b",
+            "name": "Qwen3.6-35B-A3B",
+            "maxInputTokens": 262144,
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen3.6-27b",
+            "name": "Qwen3.6-27B",
+            "maxInputTokens": 262144,
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen3.7-max",
+            "name": "Qwen3.7-Max",
+            "maxInputTokens": 1000000,
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen-latest-series-invite-beta-v24",
+            "name": "Qwen3.7-Max-Preview",
+            "maxInputTokens": 262144,
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen-latest-series-invite-beta-v16",
+            "name": "Qwen3.7-Plus-Preview",
+            "maxInputTokens": 1000000,
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen3.5-plus",
+            "name": "Qwen3.5-Plus",
+            "maxInputTokens": 1000000,
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen3.5-max-2026-03-08",
+            "name": "Qwen3.5-Max-Preview",
+            "maxInputTokens": 262144,
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen3.5-flash",
+            "name": "Qwen3.5-Flash",
+            "maxInputTokens": 1000000,
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen3.5-397b-a17b",
+            "name": "Qwen3.5-397B-A17B",
+            "maxInputTokens": 262144,
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen3.5-122b-a10b",
+            "name": "Qwen3.5-122B-A10B",
+            "maxInputTokens": 262144,
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen3.5-27b",
+            "name": "Qwen3.5-27B",
+            "maxInputTokens": 262144,
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen3.5-35b-a3b",
+            "name": "Qwen3.5-35B-A3B",
+            "maxInputTokens": 262144,
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen3-max-2026-01-23",
             "name": "Qwen3-Max",
+            "maxInputTokens": 262144,
             "capabilities": {
               "chat": true
             }
           },
           {
-            "id": "qwen-coder",
+            "id": "qwen-plus-2025-07-28",
+            "name": "Qwen3-235B-A22B-2507",
+            "maxInputTokens": 131072,
+            "capabilities": {
+              "chat": true
+            }
+          },
+          {
+            "id": "qwen3-coder-plus",
             "name": "Qwen3-Coder",
+            "maxInputTokens": 1048576,
             "capabilities": {
               "chat": true
             }
           },
           {
-            "id": "qwen-flash",
-            "name": "Qwen3.5-Flash (fast)",
+            "id": "qwen-max-latest",
+            "name": "Qwen2.5-Max",
+            "maxInputTokens": 131072,
             "capabilities": {
               "chat": true
             }
@@ -111,7 +222,8 @@
     "package": "vsce package --allow-missing-repository"
   },
   "enabledApiProposals": [
-    "chatProvider"
+    "chatProvider",
+    "languageModelThinkingPart"
   ],
   "engines": {
     "vscode": "^1.103.0",
@@ -119,5 +231,8 @@
   },
   "dependencies": {
     "playwright": "^1.60.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0"
   }
 }

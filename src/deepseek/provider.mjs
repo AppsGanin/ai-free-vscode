@@ -1,35 +1,21 @@
-import { debug, error, info } from "../utils/logger.mjs";
+import { debug, error, info, isDebugMode } from "../utils/logger.mjs";
 import { isApiCallAllowed } from "../utils/rateLimiter.mjs";
-import { isValidToken } from "../utils/tokenValidator.mjs";
 import { DeepSeekClient } from "./client.mjs";
+const T = "DeepSeek via browser session (no API key)";
 
 export const MODELS = [
   {
     id: "deepseek-default",
-    name: "DeepSeek V4 (default)",
+    name: "DeepSeek",
     family: "deepseek",
     version: "1.0.0",
-    maxInputTokens: 128000,
+    maxInputTokens: 131072,
     maxOutputTokens: 8192,
     capabilities: { toolCalling: true, imageInput: false },
-    tooltip: "DeepSeek via browser session (no API key)",
-  },
-  {
-    id: "deepseek-expert",
-    name: "DeepSeek V4 (expert)",
-    family: "deepseek",
-    version: "1.0.0",
-    maxInputTokens: 128000,
-    maxOutputTokens: 8192,
-    capabilities: { toolCalling: true, imageInput: false },
-    tooltip: "DeepSeek via browser session (no API key)",
+    tooltip: T,
+    params: { modelType: "default", thinkingEnabled: false },
   },
 ];
-
-export const MODEL_PARAMS = {
-  "deepseek-default": { modelType: "default", thinkingEnabled: false },
-  "deepseek-expert": { modelType: "expert", thinkingEnabled: true },
-};
 
 /** threadKey → sessionId cache so the same VS Code thread reuses one DeepSeek session */
 const sessionIdCache = new Map();
@@ -66,17 +52,6 @@ export async function runComplete({
     throw err;
   }
 
-  // Check token validity
-  const isValid = await isValidToken(auth.cookieHeader, auth.token);
-  if (!isValid) {
-    const err = new Error(
-      "⚠️ DeepSeek token is invalid or expired. Please sign in again.",
-    );
-    err.isNotSignedIn = true;
-    error("Token validation failed", { modelId });
-    throw err;
-  }
-
   // Check rate limit
   const userId = auth.token.substring(0, 8); // Use a portion of the token as identifier
   if (!isApiCallAllowed("deepseek", userId)) {
@@ -94,10 +69,11 @@ export async function runComplete({
   const client = new DeepSeekClient({
     cookieHeader: auth.cookieHeader,
     token: auth.token,
-    debug: true,
+    debug: isDebugMode(),
   });
 
-  const params = MODEL_PARAMS[modelId] ?? MODEL_PARAMS["deepseek-default"];
+  const model = MODELS.find((m) => m.id === modelId) ?? MODELS[0];
+  const params = model.params ?? {};
   const cacheKey = threadKey ?? modelId;
 
   // First message of a new VS Code thread — always start a fresh DeepSeek session
@@ -165,6 +141,16 @@ export async function runComplete({
     error("Failed to create session", { error: sessionErr.message });
     throw sessionErr;
   }
+
+  // Stop may arrive in a narrow race right after session creation.
+  // In that case, abort without starting completion.
+  if (signal?.aborted) {
+    const abortErr = new Error("Request aborted");
+    abortErr.name = "AbortError";
+    abortErr.code = "ABORT_ERR";
+    throw abortErr;
+  }
+
   sessionIdCache.set(cacheKey, sessionId);
 
   await attempt(sessionId);

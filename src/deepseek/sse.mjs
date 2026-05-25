@@ -2,6 +2,8 @@ export async function streamSseFromNodeResponse(
   res,
   debug,
   onText = null,
+  onMessageId = null,
+  signal = null,
   timeout = 30000,
 ) {
   const decoder = new TextDecoder();
@@ -26,8 +28,17 @@ export async function streamSseFromNodeResponse(
     }
   };
 
+  const throwIfAborted = () => {
+    if (!signal?.aborted) return;
+    const err = new Error("Request aborted");
+    err.name = "AbortError";
+    err.code = "ABORT_ERR";
+    throw err;
+  };
+
   try {
     for await (const chunk of res) {
+      throwIfAborted();
       // Update last activity time
       lastActivityTime = Date.now();
 
@@ -35,6 +46,7 @@ export async function streamSseFromNodeResponse(
 
       let boundary;
       while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+        throwIfAborted();
         const rawEvent = buffer.slice(0, boundary);
         buffer = buffer.slice(boundary + 2);
         const event = parseSseEvent(rawEvent);
@@ -54,12 +66,36 @@ export async function streamSseFromNodeResponse(
           continue;
         }
 
+        // Detect biz errors delivered inside the SSE stream
+        const sseBizCode =
+          parsed?.data?.biz_code ?? parsed?.biz_code ?? parsed?.data?.code;
+        if (sseBizCode !== undefined && sseBizCode !== 0) {
+          const sseBizMsg =
+            parsed?.data?.biz_msg ??
+            parsed?.biz_msg ??
+            parsed?.data?.msg ??
+            parsed?.msg ??
+            "";
+          const sseBizData = parsed?.data?.biz_data ?? parsed?.biz_data ?? null;
+          const err = new Error(
+            `DeepSeek biz error ${sseBizCode}: ${sseBizMsg}`,
+          );
+          err.isBizError = true;
+          err.bizCode = sseBizCode;
+          err.bizMsg = sseBizMsg;
+          err.bizData = sseBizData;
+          throw err;
+        }
+
         const { text, messageId } = extractDeltaText(
           parsed,
           fragments,
           event.event,
         );
-        if (messageId !== null) lastAssistantMessageId = messageId;
+        if (messageId !== null) {
+          lastAssistantMessageId = messageId;
+          if (onMessageId) onMessageId(messageId);
+        }
         if (text) {
           fullText += text;
           if (onText) await onText(text);

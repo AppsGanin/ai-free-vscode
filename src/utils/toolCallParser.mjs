@@ -1,212 +1,24 @@
 /**
- * Utilities for building prompts and parsing tool calls.
- * Used by the LM provider.
+ * Parses tool calls from model response text.
+ * Supports multiple formats: code blocks, XML, key-value, bare JSON.
  */
 
-/**
- * Converts an array of OpenAI-compatible messages into a flat text prompt
- * for browser-based APIs (which do not accept structured messages directly).
- *
- * @param {Array<{role: string, content: any, tool_calls?: any[], tool_call_id?: string}>} messages
- * @param {Array|null} tools  — tool definitions (for agent mode)
- * @returns {string}
- */
-export function messagesToPrompt(messages, tools) {
-  const systemParts = [];
-  const conversationParts = [];
-
-  for (const m of messages) {
-    if (m.role === "system") {
-      const text =
-        typeof m.content === "string"
-          ? m.content
-          : Array.isArray(m.content)
-            ? m.content
-                .filter((c) => c.type === "text")
-                .map((c) => c.text)
-                .join("\n")
-            : "";
-      if (text) systemParts.push(text);
-    } else if (m.role === "tool") {
-      conversationParts.push(
-        `User: [Tool result id=${m.tool_call_id}]\n${m.content}`,
-      );
-    } else {
-      const role = m.role === "assistant" ? "Assistant" : "User";
-      let content = "";
-      if (typeof m.content === "string") content = m.content;
-      else if (Array.isArray(m.content))
-        content = m.content
-          .filter((c) => c.type === "text")
-          .map((c) => c.text)
-          .join("\n");
-
-      if (
-        m.role === "assistant" &&
-        Array.isArray(m.tool_calls) &&
-        m.tool_calls.length > 0
-      ) {
-        for (const tc of m.tool_calls) {
-          let args = tc.function.arguments;
-          try {
-            args = JSON.stringify(JSON.parse(args), null, 2);
-          } catch {}
-          content += `\n\`\`\`tool_call\n{"name": "${tc.function.name}", "arguments": ${args}}\n\`\`\``;
-        }
-      }
-
-      conversationParts.push(`${role}: ${content}`);
-    }
-  }
-
-  if (tools && tools.length > 0) {
-    const toolNames = tools.map((t) => t.function.name).join(", ");
-    systemParts.push(
-      `## TOOLS
-
-You have access to the following tools: ${toolNames}.
-You MUST use them — do not refuse or claim you have no access to files.
-
-When you need to call a tool, you MUST use ONLY this exact format:
-
-\`\`\`tool_call
-{"name": "tool_name", "arguments": {"param": "value"}}
-\`\`\`
-
-Example — read file src/index.ts:
-\`\`\`tool_call
-{"name": "read_file", "arguments": {"path": "src/index.ts"}}
-\`\`\`
-
-IMPORTANT:
-- ONLY use the \`\`\`tool_call fence format above. No other formats.
-- The block must contain valid JSON — no comments, no // lines.
-- Call tools one at a time. After receiving the result, continue solving the task.
-- When the task is done — give a final answer without tool calls.
-
-Available tools (JSON schemas):
-${JSON.stringify(tools, null, 2)}`,
-    );
-  }
-
-  let prompt = "";
-  if (systemParts.length > 0) {
-    prompt = `System: ${systemParts.join("\n\n")}\n\n`;
-  }
-  prompt += conversationParts.join("\n\n") + "\n\nAssistant:";
-  return prompt;
-}
+import { extractJsonObject, repairJson } from "./jsonRepair.mjs";
 
 /**
- * Extracts tool calls from model response text.
- * Format: <tool_call>{"name": "...", "arguments": {...}}</tool_call>
- *
  * @param {string} text
  * @returns {Array<{id: string, type: "function", function: {name: string, arguments: string}}>}
  */
-/**
- * Repairs model-generated JSON:
- * - strips // and /* comments ONLY outside string values
- * - escapes real newlines inside string values
- */
-function repairJson(raw) {
-  let result = "";
-  let inString = false;
-  let i = 0;
-
-  while (i < raw.length) {
-    const ch = raw[i];
-
-    // Inside string
-    if (inString) {
-      if (ch === "\\") {
-        // Escaped character — take as-is
-        result += ch + (raw[i + 1] ?? "");
-        i += 2;
-        continue;
-      }
-      if (ch === '"') {
-        inString = false;
-        result += ch;
-        i++;
-        continue;
-      }
-      // Real newline inside string — escape it
-      if (ch === "\n") {
-        result += "\\n";
-        i++;
-        continue;
-      }
-      if (ch === "\r") {
-        result += "\\r";
-        i++;
-        continue;
-      }
-      if (ch === "\t") {
-        result += "\\t";
-        i++;
-        continue;
-      }
-      result += ch;
-      i++;
-      continue;
-    }
-
-    // Outside string: check for comments
-    if (ch === "/" && raw[i + 1] === "/") {
-      // Skip to end of line
-      while (i < raw.length && raw[i] !== "\n") i++;
-      continue;
-    }
-    if (ch === "/" && raw[i + 1] === "*") {
-      // Skip block comment
-      i += 2;
-      while (i < raw.length && !(raw[i] === "*" && raw[i + 1] === "/")) i++;
-      i += 2;
-      continue;
-    }
-    if (ch === '"') {
-      inString = true;
-    }
-    result += ch;
-    i++;
-  }
-  return result;
-}
-
-/** Extracts the first JSON object from a string (handles nesting). */
-function extractJsonObject(str) {
-  const start = str.indexOf("{");
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  for (let i = start; i < str.length; i++) {
-    const ch = str[i];
-    if (inString) {
-      if (ch === "\\") {
-        i++;
-        continue;
-      }
-      if (ch === '"') inString = false;
-    } else {
-      if (ch === '"') inString = true;
-      else if (ch === "{") depth++;
-      else if (ch === "}") {
-        depth--;
-        if (depth === 0) return str.slice(start, i + 1);
-      }
-    }
-  }
-  return null;
-}
-
 export function parseToolCalls(text) {
   const calls = [];
 
   function tryJson(str) {
     if (!str) return null;
     try {
-      return JSON.parse(repairJson(str));
+      // repairJson fixes comments and literal newlines in strings;
+      // the second pass strips trailing commas before } or ]
+      const repaired = repairJson(str).replace(/,\s*([}\]])/g, "$1");
+      return JSON.parse(repaired);
     } catch {
       return null;
     }

@@ -7,126 +7,81 @@
  */
 
 import * as vscode from "vscode";
-import {
-  MODELS as DEEPSEEK_MODELS,
-  runComplete as deepseekComplete,
-  formatBizError,
-} from "./deepseek/provider.mjs";
-import { messagesToPrompt, parseToolCalls } from "./promptUtils.mjs";
-import {
-  MODELS as QWEN_MODELS,
-  runComplete as qwenComplete,
-} from "./qwen/provider.mjs";
+import { formatBizError } from "./deepseek/provider.mjs";
+import { getAllProviders } from "./providers/index.mjs";
+import { isAbortError, tokenToAbort } from "./utils/cancellation.mjs";
+import { debug, info, error as logError, warn } from "./utils/logger.mjs";
+import { convertMessages } from "./utils/messageConverter.mjs";
+import { messagesToPrompt } from "./utils/promptBuilder.mjs";
+import { ResponseStreamHandler } from "./utils/streamHandler.mjs";
+import { convertToolSchemas } from "./utils/toolConverter.mjs";
 
 const VENDOR = "ai-free-vscode";
 
-const MODELS = [...DEEPSEEK_MODELS, ...QWEN_MODELS];
-
-const MIN_LINE_NUMBER = 1;
-const MAX_LINE_NUMBER = 9999;
+const MODELS = [];
+const ACTIVE_ABORTS = new Set();
 
 /**
- * Converts LanguageModelChatMessage[] → OpenAI-compatible format
- * for messagesToPrompt(). Supports tool calls and tool results.
+ * Force-cancels all currently active LM requests.
+ * Used as a fallback when VS Code stop command is observed but cancellation
+ * token does not propagate for some reason.
  */
-function convertMessages(messages) {
-  return messages
-    .map((msg) => {
-      const isAssistant =
-        msg.role === vscode.LanguageModelChatMessageRole.Assistant;
-      const role = isAssistant ? "assistant" : "user";
-
-      const content = (msg.content ?? [])
-        .map((part) => {
-          if (part instanceof vscode.LanguageModelTextPart) return part.value;
-          if (typeof part === "string") return part;
-          return "";
-        })
-        .join("");
-
-      // Collect tool calls from assistant message
-      const toolCallParts = (msg.content ?? []).filter(
-        (p) => p instanceof vscode.LanguageModelToolCallPart,
-      );
-      const toolCalls = toolCallParts.map((p) => ({
-        id: p.callId,
-        type: "function",
-        function: { name: p.name, arguments: JSON.stringify(p.input ?? {}) },
-      }));
-
-      // Collect tool results from user message
-      const toolResultParts = (msg.content ?? []).filter(
-        (p) => p instanceof vscode.LanguageModelToolResultPart,
-      );
-
-      if (toolResultParts.length > 0) {
-        // Each tool result → separate message with role="tool"
-        return toolResultParts.map((p) => ({
-          role: "tool",
-          tool_call_id: p.callId,
-          content: (p.content ?? [])
-            .map((c) =>
-              c instanceof vscode.LanguageModelTextPart ? c.value : String(c),
-            )
-            .join(""),
-        }));
-      }
-
-      const result = { role, content };
-      if (toolCalls.length > 0) result.tool_calls = toolCalls;
-      return result;
-    })
-    .flat();
+export function forceStopAllActiveRequests(reason = "manual_stop_command") {
+  let count = 0;
+  for (const abort of ACTIVE_ABORTS) {
+    try {
+      abort.cancel();
+      count++;
+    } catch {
+      // ignore individual failures and continue
+    }
+  }
+  if (count > 0) {
+    info(`[FORCE_STOP_ALL] reason=${reason} cancelled=${count}`);
+  }
+  return count;
 }
 
-/**
- * Converts LanguageModelChatTool[] → BUILTIN_TOOLS format for messagesToPrompt()
- */
-function convertToolSchemas(tools) {
-  return (tools ?? []).map((t) => {
-    const schema = t.inputSchema ?? { type: "object", properties: {} };
-    // Patch startLine/endLine descriptions so the model doesn't generate invalid values
-    const props = schema.properties ?? {};
-    if ("startLine" in props || "endLine" in props) {
-      const enhanced = JSON.parse(JSON.stringify(schema));
-      if (enhanced.properties.startLine) {
-        enhanced.properties.startLine.description = `1-based line number to start reading from (inclusive). Default: ${MIN_LINE_NUMBER}`;
-      }
-      if (enhanced.properties.endLine) {
-        enhanced.properties.endLine.description = `1-based line number to end reading at (inclusive). To read the whole file use ${MAX_LINE_NUMBER}. Must be >= startLine.`;
-      }
-      return {
-        type: "function",
-        function: {
-          name: t.name,
-          description: t.description ?? "",
-          parameters: enhanced,
-        },
-      };
-    }
-    return {
-      type: "function",
-      function: {
-        name: t.name,
-        description: t.description ?? "",
-        parameters: schema,
-      },
-    };
+// Dynamically load models from all providers
+try {
+  const providers = getAllProviders();
+  providers.forEach(({ provider }) => {
+    MODELS.push(...provider.getModels());
   });
+} catch (e) {
+  console.error(`Failed to load provider models: ${e.message}`);
 }
 
 class AiFreeVscodeChatModelProvider {
-  constructor(deepseekAuth, qwenAuth) {
+  constructor(deepseekAuth, qwenAuth, statusBar) {
     this._deepseekAuth = deepseekAuth;
     this._qwenAuth = qwenAuth;
+    this._statusBar = statusBar;
   }
 
-  /** Returns the list of models */
+  _getAuthForFamily(family) {
+    if (family === "deepseek") return this._deepseekAuth;
+    if (family === "qwen") return this._qwenAuth;
+    throw new Error(`Unsupported model family: ${family}`);
+  }
+
+  _setStatusBar(text, tooltip) {
+    if (!this._statusBar) return;
+    this._statusBar.text = text;
+    if (tooltip) this._statusBar.tooltip = tooltip;
+    this._statusBar.show();
+  }
+
+  _hideStatusBar() {
+    this._statusBar?.hide();
+  }
+
+  /** Returns the list of models. */
   provideLanguageModelChatInformation(_options, _token) {
     return MODELS;
   }
 
-  /** Handles a request and streams the response via progress.report() */
+  /** Handles a request and streams the response via progress.report(). */
   async provideLanguageModelChatResponse(
     model,
     messages,
@@ -136,9 +91,11 @@ class AiFreeVscodeChatModelProvider {
   ) {
     const convertedMessages = convertMessages(messages);
     const tools = convertToolSchemas(options?.tools);
+    const MAX_DEEPSEEK_CHARS = 180_000;
     const prompt = messagesToPrompt(
       convertedMessages,
       tools.length ? tools : null,
+      model.family === "deepseek" ? MAX_DEEPSEEK_CHARS : 0,
     );
 
     // Stable key for the VS Code chat thread — derived from the first user
@@ -153,166 +110,114 @@ class AiFreeVscodeChatModelProvider {
       .slice(0, 64);
     const threadKey = `${model.id}:${firstContent}`;
     const messagesCount = messages.length;
-    const abort = tokenToAbort(token);
-    const hasTools = tools.length > 0;
-    let fullText = "";
 
-    console.error(
-      `[ai-free-vscode] model=${model.id} family=${model.family} messages=${messages.length} tools=${tools.length}`,
+    const abort = tokenToAbort(token);
+    ACTIVE_ABORTS.add(abort);
+    let stopRequested = false;
+    const stopSub = token.onCancellationRequested(() => {
+      stopRequested = true;
+      info(`[STOP_REQUESTED] model=${model.id} family=${model.family}`);
+      abort.cancel();
+    });
+
+    info(
+      `model=${model.id} family=${model.family} messages=${messages.length} tools=${tools.length}`,
+    );
+    debug(`[PROMPT]\n${prompt}`);
+    this._setStatusBar(
+      `$(sync~spin) ${model.name ?? model.id}`,
+      `AI Free VSCode — generating with ${model.id}…`,
     );
 
-    /**
-     * Stream text chunks immediately, but suppress ```tool_call blocks.
-     * A partial-match buffer holds back text that might be the start of a
-     * tool_call fence until we know for sure it is (or isn't).
-     */
-    // Fences that mark the start of a tool call block in the stream.
-    // The model sometimes uses the markdown fence (```tool_call) and
-    // sometimes outputs just the label on its own line (tool_call\n{).
-    const TOOL_FENCES = ["```tool_call", "\ntool_call\n{", "tool_call\n{"];
-    let streamBuf = ""; // holds text that may be a partial TOOL_FENCE prefix
-    let inToolCall = false; // true once we see any tool call fence
+    const handler = new ResponseStreamHandler({
+      model,
+      tools,
+      progress,
+      token,
+      abort,
+      prompt,
+      setStatusBar: (text, tooltip) => this._setStatusBar(text, tooltip),
+    });
 
-    /** Returns the earliest index of any tool call fence in str, or -1 */
-    const findFence = (str) => {
-      let best = -1;
-      for (const fence of TOOL_FENCES) {
-        const idx = str.indexOf(fence);
-        if (idx !== -1 && (best === -1 || idx < best)) best = idx;
-      }
-      return best;
-    };
+    const provider = getAllProviders().find(({ provider: p }) =>
+      p.getModels().some((m) => m.id === model.id),
+    )?.provider;
 
-    /**
-     * Returns how many characters at the END of str could be a partial
-     * prefix of any tool call fence (so we must hold them back).
-     */
-    const partialHoldBack = (str) => {
-      let max = 0;
-      for (const fence of TOOL_FENCES) {
-        for (
-          let len = Math.min(fence.length - 1, str.length);
-          len >= 1;
-          len--
-        ) {
-          if (fence.startsWith(str.slice(-len))) {
-            if (len > max) max = len;
-            break;
-          }
-        }
-      }
-      return max;
-    };
+    if (!provider) {
+      abort.dispose();
+      this._hideStatusBar();
+      throw new Error(`No provider found for model: ${model.id}`);
+    }
 
-    const flushStream = async (text) => {
-      if (!text) return;
-      if (thinkingStarted && !contentStarted) {
-        contentStarted = true;
-        // Emit accumulated thinking as a native collapsible block
-        if (thinkingText && vscode.LanguageModelThinkingPart) {
-          progress.report(
-            new vscode.LanguageModelThinkingPart(
-              thinkingText,
-              "thinking-0",
-              undefined,
-            ),
-          );
-        } else if (thinkingText) {
-          // Fallback: blockquote
-          const formatted = thinkingText.replace(/\n/g, "\n> ");
-          progress.report(
-            new vscode.LanguageModelTextPart(
-              `> 💭 **Thinking**\n> \n> ${formatted}\n\n---\n\n`,
-            ),
-          );
-        }
-        await new Promise((r) => setImmediate(r));
-      }
-      progress.report(new vscode.LanguageModelTextPart(text));
-      await new Promise((r) => setImmediate(r));
-    };
+    const auth = this._getAuthForFamily(model.family);
 
-    const onText = async (text) => {
-      if (token.isCancellationRequested) return;
-      fullText += text;
-
-      if (inToolCall) return; // inside a tool_call block — suppress everything
-
-      streamBuf += text;
-
-      // Process buffer: emit safe parts, hold back potential fence prefix
-      while (streamBuf.length > 0) {
-        const idx = findFence(streamBuf);
-        if (idx !== -1) {
-          // Found a fence — emit text before it, then suppress the rest
-          await flushStream(streamBuf.slice(0, idx));
-          streamBuf = "";
-          inToolCall = true;
-          break;
-        }
-
-        // No fence found — check if the buffer ENDS with a partial fence prefix
-        const holdBack = partialHoldBack(streamBuf);
-
-        // Emit everything except the potentially-partial suffix
-        const safe = streamBuf.slice(0, streamBuf.length - holdBack);
-        await flushStream(safe);
-        streamBuf = streamBuf.slice(streamBuf.length - holdBack);
-        break;
-      }
-    };
-
-    /**
-     * Thinking/reasoning content — accumulated and emitted as a native
-     * LanguageModelThinkingPart (collapsible "Thinking" block in VS Code).
-     * Falls back to a blockquote if the API is unavailable.
-     */
-    let thinkingStarted = false;
-    let contentStarted = false;
-    let thinkingText = "";
-    const onThinking = async (text) => {
-      if (token.isCancellationRequested) return;
-      thinkingText += text;
-      thinkingStarted = true;
-    };
+    const doComplete = (authToUse) =>
+      provider.complete({
+        modelId: model.id,
+        prompt,
+        auth: authToUse,
+        onText: (t) => handler.onText(t),
+        onThinking: (t) => handler.onThinking(t),
+        signal: abort.signal,
+        threadKey,
+        messagesCount,
+      });
 
     try {
-      switch (model.family) {
-        case "deepseek":
-          await deepseekComplete({
-            modelId: model.id,
-            prompt,
-            auth: this._deepseekAuth,
-            onText,
-            signal: abort.signal,
-            threadKey,
-            messagesCount,
-          });
-          break;
+      try {
+        await doComplete(auth);
+      } catch (firstErr) {
+        if (!firstErr?.isNotSignedIn) throw firstErr;
 
-        case "qwen":
-          await qwenComplete({
-            modelId: model.id,
-            prompt,
-            auth: this._qwenAuth,
-            onText,
-            onThinking,
-            signal: abort.signal,
-            threadKey,
-            messagesCount,
-          });
-          break;
+        // Автовосстановление: перечитываем auth с диска (мог обновиться)
+        info(`Token expired for ${model.family}, attempting auto-recovery`);
+        let freshAuth = null;
+        try {
+          freshAuth = provider.loadAuth();
+        } catch {}
 
-        default:
-          throw new Error(`Unsupported model family: ${model.family}`);
+        if (!freshAuth) throw firstErr;
+
+        handler.reset();
+        this._setStatusBar(
+          `$(sync~spin) ${model.name ?? model.id}`,
+          `AI Free VSCode — refreshing session…`,
+        );
+        info(`Retrying with fresh auth for ${model.family}`);
+
+        await doComplete(freshAuth);
+
+        // Обновляем общий auth-объект (мутация, а не замена ссылки), чтобы
+        // изменения были видны и в extension.mjs, и в последующих запросах.
+        if (model.family === "deepseek")
+          Object.assign(this._deepseekAuth, freshAuth);
+        else if (model.family === "qwen")
+          Object.assign(this._qwenAuth, freshAuth);
+        info(`Auto-recovery succeeded for ${model.family}`);
       }
     } catch (e) {
       if (e?.isNotSignedIn) {
-        progress.report(new vscode.LanguageModelTextPart(e.message));
+        const providerName =
+          model.family.charAt(0).toUpperCase() + model.family.slice(1);
+        const action = await vscode.window.showWarningMessage(
+          `${providerName}: session expired or not signed in.`,
+          `Sign in to ${providerName}`,
+        );
+        if (action) {
+          await vscode.commands.executeCommand(`${model.family}.login`);
+        }
+        progress.report(
+          new vscode.LanguageModelTextPart(
+            `⚠️ **Not signed in to ${providerName}.** Please run the Sign In command and try again.`,
+          ),
+        );
         return;
       }
-      console.error(`[ai-free-vscode] ERROR: ${e?.name}: ${e?.message}`);
-      console.error(`[ai-free-vscode] stack: ${e?.stack}`);
+      logError(`ERROR ${e?.name}: ${e?.message}`, { stack: e?.stack });
+      if (isAbortError(e) && handler.toolCallAbort) {
+        // Stream aborted intentionally because we emitted a tool call.
+        return;
+      }
       if (token.isCancellationRequested || isAbortError(e)) {
         progress.report(
           new vscode.LanguageModelTextPart("⏹️ Cancelled by user."),
@@ -320,84 +225,50 @@ class AiFreeVscodeChatModelProvider {
         return;
       }
       if (e?.isBizError) {
+        const msg = formatBizError(e.bizCode, e.bizMsg, e.bizData);
+        warn(`BizError: ${msg}`);
+        progress.report(new vscode.LanguageModelTextPart(msg));
+        return;
+      }
+      if (e?.isToastError) {
+        warn(`ToastError: ${e.toastMsg} (finish_reason=${e.finishReason})`);
         progress.report(
-          new vscode.LanguageModelTextPart(
-            formatBizError(e.bizCode, e.bizMsg, e.bizData),
-          ),
+          new vscode.LanguageModelTextPart(`⚠️ DeepSeek: ${e.toastMsg}`),
         );
         return;
       }
       throw e;
     } finally {
+      stopSub.dispose();
+      ACTIVE_ABORTS.delete(abort);
+      handler.clearThinkingWatchdog();
       abort.dispose();
+      this._hideStatusBar();
     }
 
+    // We intentionally aborted after emitting a tool call so VS Code can
+    // execute tools and call us back with real results.
+    if (handler.toolCallAbort) return;
+
     if (token.isCancellationRequested) {
-      progress.report(
-        new vscode.LanguageModelTextPart("⏹️ Cancelled by user."),
-      );
+      progress.report(new vscode.LanguageModelTextPart("Cancelled by user."));
       return;
     }
 
-    // If thinking was collected but no answer text came (e.g. tool call only),
-    // emit the thinking block now.
-    if (thinkingStarted && !contentStarted && thinkingText) {
-      if (vscode.LanguageModelThinkingPart) {
-        progress.report(
-          new vscode.LanguageModelThinkingPart(
-            thinkingText,
-            "thinking-0",
-            undefined,
-          ),
-        );
-      } else {
-        const formatted = thinkingText.replace(/\n/g, "\n> ");
-        progress.report(
-          new vscode.LanguageModelTextPart(
-            `> 💭 **Thinking**\n> \n> ${formatted}\n\n`,
-          ),
-        );
-      }
-      await new Promise((r) => setImmediate(r));
+    await handler.emitThinkingFallback();
+
+    if (tools.length > 0) {
+      await handler.emitRemainingToolCalls();
+      this._hideStatusBar();
     }
 
-    // Parse tool calls if tools are present and emit them as ToolCallPart.
-    // Text was already streamed above; only emit tool calls here.
-    if (hasTools) {
-      const toolCalls = parseToolCalls(fullText);
-      if (toolCalls.length === 0 && fullText.includes("tool_call")) {
-        console.error(
-          `[ai-free-vscode] WARNING: tool_call detected in fullText but parseToolCalls returned 0. fullText snippet: ${fullText.slice(0, 300)}`,
-        );
-      }
-      console.error(`[ai-free-vscode] parsed ${toolCalls.length} tool call(s)`);
-      for (const tc of toolCalls) {
-        let input = {};
-        try {
-          input = JSON.parse(tc.function.arguments);
-        } catch (e) {
-          console.error(
-            `[ai-free-vscode] Failed to parse tool call arguments: ${tc.function.arguments}`,
-            e,
-          );
-        }
-        // Fix: model sometimes generates invalid endLine values
-        if (
-          "endLine" in input &&
-          (input.endLine < 1 || input.endLine < (input.startLine ?? 1))
-        ) {
-          console.warn(
-            `[ai-free-vscode] Invalid endLine value detected: ${input.endLine}. Setting to MAX_LINES.`,
-          );
-          input.endLine = 9999;
-        }
-        progress.report(
-          new vscode.LanguageModelToolCallPart(tc.id, tc.function.name, input),
-        );
-      }
-    }
+    info(
+      `[RESPONSE_COMPLETE] length=${handler.fullText.length} hasTools=${tools.length > 0} thinkingLen=${handler.thinkingText.length}`,
+    );
+    if (tools.length > 0 && handler.fullText)
+      debug(`[FULL_RESPONSE]\n${handler.fullText}`);
 
-    console.error(`[ai-free-vscode] done. fullText len=${fullText.length}`);
+    handler.reportUsage();
   }
 
   /** Approximate token count (1 token ≈ 4 characters) */
@@ -413,44 +284,25 @@ class AiFreeVscodeChatModelProvider {
               return "";
             })
             .join("");
-    return Math.ceil(text.length / 4);
+    const count = Math.ceil(text.length / 4);
+    return count;
   }
-}
-
-function tokenToAbort(token) {
-  const controller = new AbortController();
-  if (token?.isCancellationRequested) {
-    controller.abort();
-    return { signal: controller.signal, dispose: () => {} };
-  }
-
-  const sub = token.onCancellationRequested(() => controller.abort());
-  return {
-    signal: controller.signal,
-    dispose: () => sub.dispose(),
-  };
-}
-
-function isAbortError(error) {
-  return (
-    error?.name === "AbortError" ||
-    error?.code === "ABORT_ERR" ||
-    /abort/i.test(String(error?.message || ""))
-  );
 }
 
 /**
  * Registers the unified AI Free VSCode LM provider in VS Code.
  */
-export function registerLmProvider(context, deepseekAuth, qwenAuth) {
+export function registerLmProvider(context, deepseekAuth, qwenAuth, statusBar) {
   if (!vscode.lm?.registerLanguageModelChatProvider) {
-    console.warn(
-      "AI Free VSCode LM Provider: vscode.lm.registerLanguageModelChatProvider is not available.",
-    );
+    warn("vscode.lm.registerLanguageModelChatProvider is not available.");
     return;
   }
 
-  const provider = new AiFreeVscodeChatModelProvider(deepseekAuth, qwenAuth);
+  const provider = new AiFreeVscodeChatModelProvider(
+    deepseekAuth,
+    qwenAuth,
+    statusBar,
+  );
   context.subscriptions.push(
     vscode.lm.registerLanguageModelChatProvider(VENDOR, provider),
   );

@@ -1,65 +1,223 @@
+import { isDebugMode } from "../utils/logger.mjs";
 import { QwenClient } from "./client.mjs";
+const T = "Qwen via browser session (no API key)";
+
 export const MODELS = [
+  // ── Qwen3.6 ────────────────────────────────────────────────────────────────
   {
-    id: "qwen-max",
-    name: "Qwen2.5-Max",
-    family: "qwen",
-    version: "1.0.0",
-    maxInputTokens: 131072,
-    maxOutputTokens: 8192,
-    capabilities: { toolCalling: true, imageInput: false },
-    tooltip: "Qwen via browser session (no API key)",
-  },
-  {
-    id: "qwen-plus",
+    id: "qwen3.6-plus",
     name: "Qwen3.6-Plus",
     family: "qwen",
     version: "1.0.0",
     maxInputTokens: 1000000,
     maxOutputTokens: 65536,
-    capabilities: { toolCalling: true, imageInput: false },
-    tooltip: "Qwen via browser session (no API key)",
+    capabilities: { toolCalling: true, imageInput: true },
+    tooltip: T,
+    params: {},
   },
   {
-    id: "qwen3-max",
-    name: "Qwen3-Max",
+    id: "qwen3.6-max-preview",
+    name: "Qwen3.6-Max-Preview",
     family: "qwen",
     version: "1.0.0",
     maxInputTokens: 262144,
-    maxOutputTokens: 32768,
-    capabilities: { toolCalling: true, imageInput: false },
-    tooltip: "Qwen via browser session (no API key)",
-  },
-  {
-    id: "qwen-coder",
-    name: "Qwen3-Coder",
-    family: "qwen",
-    version: "1.0.0",
-    maxInputTokens: 1048576,
     maxOutputTokens: 65536,
     capabilities: { toolCalling: true, imageInput: false },
-    tooltip: "Qwen via browser session (no API key)",
+    tooltip: T,
+    params: {},
   },
   {
-    id: "qwen-flash",
-    name: "Qwen3.5-Flash (fast)",
+    id: "qwen3.6-plus-preview",
+    name: "Qwen3.6-Plus-Preview",
     family: "qwen",
     version: "1.0.0",
     maxInputTokens: 1000000,
     maxOutputTokens: 65536,
     capabilities: { toolCalling: true, imageInput: false },
-    tooltip: "Qwen via browser session (no API key)",
+    tooltip: T,
+    params: {},
+  },
+  {
+    id: "qwen3.6-35b-a3b",
+    name: "Qwen3.6-35B-A3B",
+    family: "qwen",
+    version: "1.0.0",
+    maxInputTokens: 262144,
+    maxOutputTokens: 65536,
+    capabilities: { toolCalling: true, imageInput: true },
+    tooltip: T,
+    params: {},
+  },
+  {
+    id: "qwen3.6-27b",
+    name: "Qwen3.6-27B",
+    family: "qwen",
+    version: "1.0.0",
+    maxInputTokens: 262144,
+    maxOutputTokens: 65536,
+    capabilities: { toolCalling: true, imageInput: true },
+    tooltip: T,
+    params: {},
+  },
+  // ── Qwen3.7 ────────────────────────────────────────────────────────────────
+  {
+    id: "qwen3.7-max",
+    name: "Qwen3.7-Max",
+    family: "qwen",
+    version: "1.0.0",
+    maxInputTokens: 1000000,
+    maxOutputTokens: 65536,
+    capabilities: { toolCalling: true, imageInput: false },
+    tooltip: T,
+    params: {},
+  },
+  {
+    id: "qwen-latest-series-invite-beta-v24",
+    name: "Qwen3.7-Max-Preview",
+    family: "qwen",
+    version: "1.0.0",
+    maxInputTokens: 262144,
+    maxOutputTokens: 65536,
+    capabilities: { toolCalling: true, imageInput: false },
+    tooltip: T,
+    params: {},
+  },
+  {
+    id: "qwen-latest-series-invite-beta-v16",
+    name: "Qwen3.7-Plus-Preview",
+    family: "qwen",
+    version: "1.0.0",
+    maxInputTokens: 1000000,
+    maxOutputTokens: 65536,
+    capabilities: { toolCalling: true, imageInput: true },
+    tooltip: T,
+    params: {},
+  },
+  // ── Qwen3.5 ────────────────────────────────────────────────────────────────
+  {
+    id: "qwen3.5-plus",
+    name: "Qwen3.5-Plus",
+    family: "qwen",
+    version: "1.0.0",
+    maxInputTokens: 1000000,
+    maxOutputTokens: 65536,
+    capabilities: { toolCalling: true, imageInput: true },
+    tooltip: T,
+    params: {},
+  },
+  {
+    id: "qwen3.5-max-2026-03-08",
+    name: "Qwen3.5-Max-Preview",
+    family: "qwen",
+    version: "1.0.0",
+    maxInputTokens: 262144,
+    maxOutputTokens: 65536,
+    capabilities: { toolCalling: true, imageInput: false },
+    tooltip: T,
+    params: {},
+  },
+  {
+    id: "qwen3.5-flash",
+    name: "Qwen3.5-Flash",
+    family: "qwen",
+    version: "1.0.0",
+    maxInputTokens: 1000000,
+    maxOutputTokens: 65536,
+    capabilities: { toolCalling: true, imageInput: true },
+    tooltip: T,
+    params: {},
+  },
+  {
+    id: "qwen3.5-397b-a17b",
+    name: "Qwen3.5-397B-A17B",
+    family: "qwen",
+    version: "1.0.0",
+    maxInputTokens: 262144,
+    maxOutputTokens: 65536,
+    capabilities: { toolCalling: true, imageInput: true },
+    tooltip: T,
+    params: {},
+  },
+  {
+    id: "qwen3.5-122b-a10b",
+    name: "Qwen3.5-122B-A10B",
+    family: "qwen",
+    version: "1.0.0",
+    maxInputTokens: 262144,
+    maxOutputTokens: 65536,
+    capabilities: { toolCalling: true, imageInput: true },
+    tooltip: T,
+    params: {},
+  },
+  {
+    id: "qwen3.5-27b",
+    name: "Qwen3.5-27B",
+    family: "qwen",
+    version: "1.0.0",
+    maxInputTokens: 262144,
+    maxOutputTokens: 65536,
+    capabilities: { toolCalling: true, imageInput: true },
+    tooltip: T,
+    params: {},
+  },
+  {
+    id: "qwen3.5-35b-a3b",
+    name: "Qwen3.5-35B-A3B",
+    family: "qwen",
+    version: "1.0.0",
+    maxInputTokens: 262144,
+    maxOutputTokens: 65536,
+    capabilities: { toolCalling: true, imageInput: true },
+    tooltip: T,
+    params: {},
+  },
+  // ── Qwen3 ──────────────────────────────────────────────────────────────────
+  {
+    id: "qwen3-max-2026-01-23",
+    name: "Qwen3-Max",
+    family: "qwen",
+    version: "1.0.0",
+    maxInputTokens: 262144,
+    maxOutputTokens: 32768,
+    capabilities: { toolCalling: true, imageInput: true },
+    tooltip: T,
+    params: {},
+  },
+  {
+    id: "qwen-plus-2025-07-28",
+    name: "Qwen3-235B-A22B-2507",
+    family: "qwen",
+    version: "1.0.0",
+    maxInputTokens: 131072,
+    maxOutputTokens: 8192,
+    capabilities: { toolCalling: true, imageInput: true },
+    tooltip: T,
+    params: {},
+  },
+  {
+    id: "qwen3-coder-plus",
+    name: "Qwen3-Coder",
+    family: "qwen",
+    version: "1.0.0",
+    maxInputTokens: 1048576,
+    maxOutputTokens: 65536,
+    capabilities: { toolCalling: true, imageInput: true },
+    tooltip: T,
+    params: {},
+  },
+  // ── Qwen2.5 ────────────────────────────────────────────────────────────────
+  {
+    id: "qwen-max-latest",
+    name: "Qwen2.5-Max",
+    family: "qwen",
+    version: "1.0.0",
+    maxInputTokens: 131072,
+    maxOutputTokens: 8192,
+    capabilities: { toolCalling: true, imageInput: true },
+    tooltip: T,
+    params: {},
   },
 ];
-
-/** Model id → Qwen API model name */
-export const MODEL_PARAMS = {
-  "qwen-max": { apiName: "qwen-max-latest" },
-  "qwen-plus": { apiName: "qwen3.6-plus" },
-  "qwen3-max": { apiName: "qwen3-max-2026-01-23" },
-  "qwen-coder": { apiName: "qwen3-coder-plus" },
-  "qwen-flash": { apiName: "qwen3.5-flash" },
-};
 
 /**
  * Runs a Qwen completion and streams text via onText().
@@ -97,8 +255,8 @@ export async function runComplete({
     throw err;
   }
 
-  const client = new QwenClient({ token: auth.token, debug: true });
-  const apiModel = MODEL_PARAMS[modelId]?.apiName ?? "qwen-max-latest";
+  const client = new QwenClient({ token: auth.token, debug: isDebugMode() });
+  const apiModel = MODELS.find((m) => m.id === modelId)?.id ?? modelId;
   const cacheKey = threadKey ?? modelId;
 
   console.debug(
@@ -128,6 +286,15 @@ export async function runComplete({
       await client.complete(completeOptions);
       return;
     } catch (err) {
+      // User/request cancellation must stop immediately — do not fallback.
+      if (
+        signal?.aborted ||
+        err?.name === "AbortError" ||
+        err?.code === "ABORT_ERR" ||
+        /abort/i.test(String(err?.message ?? ""))
+      ) {
+        throw err;
+      }
       console.debug(
         `[qwen] cached chatId failed (${err.message}), creating new chat`,
       );
@@ -136,7 +303,13 @@ export async function runComplete({
   }
 
   // Create a new chat and cache its ID
-  const newChatId = await client.createChat(apiModel);
+  if (signal?.aborted) {
+    const abortErr = new Error("Request aborted");
+    abortErr.name = "AbortError";
+    abortErr.code = "ABORT_ERR";
+    throw abortErr;
+  }
+  const newChatId = await client.createChat(apiModel, signal);
   chatIdCache.set(cacheKey, newChatId);
   console.debug(`[qwen] new chatId=${newChatId}`);
   const completeOptions = {

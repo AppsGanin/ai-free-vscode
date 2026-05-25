@@ -20,9 +20,6 @@ export const BROWSER_PROFILE = path.join(
   ".deepseek-copilot-browser",
 );
 
-/** Chrome remote debugging port for CDP connection */
-export const cdpPort = 9222;
-
 /** SHA3 WASM module for the PoW solver */
 export const DEEPSEEK_SHA3_WASM =
   "https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm";
