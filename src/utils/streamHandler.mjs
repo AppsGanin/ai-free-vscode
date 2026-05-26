@@ -35,6 +35,7 @@ export class ResponseStreamHandler {
     this._abort = abort;
     this._setStatusBar = setStatusBar;
     this._promptTokens = Math.ceil((prompt?.length ?? 0) / 4);
+    this._lastReportedLen = 0;
 
     // Public state read by lmProvider after completion
     this.fullText = "";
@@ -67,6 +68,7 @@ export class ResponseStreamHandler {
     this.toolScanText = "";
     this.thinkingText = "";
     this.toolCallAbort = false;
+    this._lastReportedLen = 0;
     this._emittedToolCallKeys.clear();
     this._streamFilter.reset();
     this._thinkingFilter.reset();
@@ -159,6 +161,7 @@ export class ResponseStreamHandler {
     }
     const safe = this._streamFilter.feed(text);
     if (safe) await this._flushStream(safe);
+    this._maybePeriodicallyReportUsage();
   }
 
   async onThinking(text) {
@@ -197,6 +200,7 @@ export class ResponseStreamHandler {
       this._thinkingStreamed = true;
       await new Promise((r) => setImmediate(r));
     }
+    this._maybePeriodicallyReportUsage();
   }
 
   // ── Post-completion helpers ───────────────────────────────────────────────
@@ -238,6 +242,13 @@ export class ResponseStreamHandler {
     );
   }
 
+  _maybePeriodicallyReportUsage() {
+    const len = this.fullText.length + this.thinkingText.length;
+    if (len - this._lastReportedLen >= 250) {
+      this.reportUsage();
+    }
+  }
+
   /**
    * Report token usage so VS Code can display the context window indicator.
    * The MIME type 'usage' is the internal contract used by VS Code's
@@ -262,5 +273,6 @@ export class ResponseStreamHandler {
         "usage",
       ),
     );
+    this._lastReportedLen = this.fullText.length + this.thinkingText.length;
   }
 }
