@@ -1,15 +1,17 @@
 import fs from "node:fs";
+import { AIProvider } from "../AIProvider.mjs";
 import {
   clearProfileSession,
   loginAndSaveAuth,
   readSavedAuth,
-} from "../deepseek/auth.mjs";
-import { AUTH_FILE } from "../deepseek/config.mjs";
+} from "./auth.mjs";
+import { AUTH_FILE } from "./config.mjs";
 import {
   MODELS as DEEPSEEK_MODELS,
   runComplete as deepseekRunComplete,
-} from "../deepseek/provider.mjs";
-import { AIProvider } from "./AIProvider.mjs";
+} from "./provider.mjs";
+
+import { formatBizError } from "./provider.mjs";
 
 export class DeepSeekProvider extends AIProvider {
   getModels() {
@@ -56,5 +58,15 @@ export class DeepSeekProvider extends AIProvider {
       threadKey,
       messagesCount,
     });
+  }
+
+  mapError(e) {
+    if (e?.isBizError) {
+      return formatBizError(e.bizCode, e.bizMsg, e.bizData);
+    }
+    if (e?.isToastError) {
+      return `⚠️ DeepSeek: ${e.toastMsg}`;
+    }
+    return null;
   }
 }

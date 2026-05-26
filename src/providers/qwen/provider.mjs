@@ -1,4 +1,4 @@
-import { isDebugMode } from "../utils/logger.mjs";
+import { isDebugMode } from "../../utils/logger.mjs";
 import { QwenClient } from "./client.mjs";
 const T = "Qwen via browser session (no API key)";
 

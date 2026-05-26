@@ -10,7 +10,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { httpsRequest, readBody } from "../utils/https.mjs";
+import { httpsRequest, readBody } from "../../utils/https.mjs";
 import {
   CHAT_API_PATH,
   CREATE_CHAT_PATH,

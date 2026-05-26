@@ -1,15 +1,15 @@
 import fs from "node:fs";
+import { AIProvider } from "../AIProvider.mjs";
 import {
   clearProfileSession as clearQwenProfileSession,
   loginAndSaveAuth as loginAndSaveQwenAuth,
   readSavedAuth as readSavedQwenAuth,
-} from "../qwen/auth.mjs";
-import { AUTH_FILE as QWEN_AUTH_FILE } from "../qwen/config.mjs";
+} from "./auth.mjs";
+import { AUTH_FILE as QWEN_AUTH_FILE } from "./config.mjs";
 import {
   MODELS as QWEN_MODELS,
   runComplete as qwenRunComplete,
-} from "../qwen/provider.mjs";
-import { AIProvider } from "./AIProvider.mjs";
+} from "./provider.mjs";
 
 export class QwenProvider extends AIProvider {
   getModels() {

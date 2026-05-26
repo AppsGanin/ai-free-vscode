@@ -1,5 +1,5 @@
-import { debug, error, info, isDebugMode } from "../utils/logger.mjs";
-import { isApiCallAllowed } from "../utils/rateLimiter.mjs";
+import { debug, error, info, isDebugMode } from "../../utils/logger.mjs";
+import { isApiCallAllowed } from "../../utils/rateLimiter.mjs";
 import { DeepSeekClient } from "./client.mjs";
 const T = "DeepSeek via browser session (no API key)";
 

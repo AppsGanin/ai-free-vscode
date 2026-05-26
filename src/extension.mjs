@@ -9,7 +9,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import * as vscode from "vscode";
-import { registerLmProvider } from "./lmProvider.mjs";
+import { registerLmProvider } from "./providers/AiFreeProvider.mjs";
 import { getProvider } from "./providers/index.mjs";
 import {
   dispose as disposeLogger,

@@ -58,4 +58,15 @@ export class AIProvider {
   }) {
     throw new Error("Method not implemented");
   }
+
+  /**
+   * Maps a provider-specific error to a user-facing message string.
+   * Return a string to display it and swallow the error.
+   * Return null to let the caller handle or rethrow.
+   * @param {unknown} _e
+   * @returns {string|null}
+   */
+  mapError(_e) {
+    return null;
+  }
 }

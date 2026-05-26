@@ -7,14 +7,13 @@
  */
 
 import * as vscode from "vscode";
-import { formatBizError } from "./deepseek/provider.mjs";
-import { getAllProviders } from "./providers/index.mjs";
-import { isAbortError, tokenToAbort } from "./utils/cancellation.mjs";
-import { debug, info, error as logError, warn } from "./utils/logger.mjs";
-import { convertMessages } from "./utils/messageConverter.mjs";
-import { messagesToPrompt } from "./utils/promptBuilder.mjs";
-import { ResponseStreamHandler } from "./utils/streamHandler.mjs";
-import { convertToolSchemas } from "./utils/toolConverter.mjs";
+import { isAbortError, tokenToAbort } from "../utils/cancellation.mjs";
+import { debug, info, error as logError, warn } from "../utils/logger.mjs";
+import { convertMessages } from "../utils/messageConverter.mjs";
+import { messagesToPrompt } from "../utils/promptBuilder.mjs";
+import { ResponseStreamHandler } from "../utils/streamHandler.mjs";
+import { convertToolSchemas } from "../utils/toolConverter.mjs";
+import { getAllProviders } from "./index.mjs";
 
 const VENDOR = "ai-free-vscode";
 
@@ -224,17 +223,12 @@ class AiFreeVscodeChatModelProvider {
         );
         return;
       }
-      if (e?.isBizError) {
-        const msg = formatBizError(e.bizCode, e.bizMsg, e.bizData);
-        warn(`BizError: ${msg}`);
-        progress.report(new vscode.LanguageModelTextPart(msg));
-        return;
+      if (e?.isBizError || e?.isToastError) {
+        warn(`Provider error: ${e.bizMsg ?? e.toastMsg}`);
       }
-      if (e?.isToastError) {
-        warn(`ToastError: ${e.toastMsg} (finish_reason=${e.finishReason})`);
-        progress.report(
-          new vscode.LanguageModelTextPart(`⚠️ DeepSeek: ${e.toastMsg}`),
-        );
+      const providerMsg = provider?.mapError(e);
+      if (providerMsg != null) {
+        progress.report(new vscode.LanguageModelTextPart(providerMsg));
         return;
       }
       throw e;

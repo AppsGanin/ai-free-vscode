@@ -1,5 +1,5 @@
-import { DeepSeekProvider } from "./deepseek.mjs";
-import { QwenProvider } from "./qwen.mjs";
+import { DeepSeekProvider } from "./deepseek/index.mjs";
+import { QwenProvider } from "./qwen/index.mjs";
 
 const providers = {
   deepseek: new DeepSeekProvider(),

@@ -1,4 +1,4 @@
-import { httpsRequest, readBody } from "../utils/https.mjs";
+import { httpsRequest, readBody } from "../../utils/https.mjs";
 import { BASE_URL, COMPLETION_PATH } from "./config.mjs";
 import { baseHeaders } from "./headers.mjs";
 import { solvePow } from "./pow.mjs";
