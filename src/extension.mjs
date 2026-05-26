@@ -43,23 +43,16 @@ export async function activate(context) {
   const deepseekProvider = getProvider("deepseek");
   const qwenProvider = getProvider("qwen");
 
-  try {
-    const savedDeepseek = deepseekProvider.loadAuth();
-    if (savedDeepseek) {
-      deepseekAuth.cookieHeader = savedDeepseek.cookieHeader;
-      deepseekAuth.token = savedDeepseek.token;
+  for (const [provider, authObj, name] of [
+    [deepseekProvider, deepseekAuth, "DeepSeek"],
+    [qwenProvider, qwenAuth, "Qwen"],
+  ]) {
+    try {
+      const saved = provider.loadAuth();
+      if (saved) Object.assign(authObj, saved);
+    } catch (e) {
+      console.warn(`${name}: failed to read saved auth: ${e?.message || e}`);
     }
-  } catch (e) {
-    console.warn(`DeepSeek: failed to read saved auth: ${e?.message || e}`);
-  }
-
-  try {
-    const savedQwen = qwenProvider.loadAuth();
-    if (savedQwen) {
-      qwenAuth.token = savedQwen.token;
-    }
-  } catch (e) {
-    console.warn(`Qwen: failed to read saved auth: ${e?.message || e}`);
   }
 
   // Command: sign in via Playwright
@@ -151,7 +144,14 @@ export async function activate(context) {
 
   // Register unified AI Free VSCode provider
   try {
-    registerLmProvider(context, deepseekAuth, qwenAuth, statusBar);
+    registerLmProvider(
+      context,
+      {
+        deepseek: deepseekAuth,
+        qwen: qwenAuth,
+      },
+      statusBar,
+    );
   } catch (e) {
     logError(
       `AI Free VSCode: failed to register language model provider: ${e?.message || e}`,

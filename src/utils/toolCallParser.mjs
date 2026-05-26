@@ -159,7 +159,7 @@ export function parseToolCalls(text) {
   // GROUP 3: key-value string formats
   // =========================================================
 
-  // Action: name\nAction Input: {...}  (ReAct / LangChain / Qwen / ChatGLM)
+  // Action: name\nAction Input: {...}  (ReAct / LangChain / Qwen)
   {
     const actionRe = /^Action:\s*(.+?)\s*$/gm;
     while ((m = actionRe.exec(text)) !== null) {

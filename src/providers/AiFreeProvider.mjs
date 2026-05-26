@@ -52,15 +52,17 @@ try {
 }
 
 class AiFreeVscodeChatModelProvider {
-  constructor(deepseekAuth, qwenAuth, statusBar) {
-    this._deepseekAuth = deepseekAuth;
-    this._qwenAuth = qwenAuth;
+  /**
+   * @param {Record<string, object>} authMap  family → mutable auth object
+   * @param {vscode.StatusBarItem | undefined} statusBar
+   */
+  constructor(authMap, statusBar) {
+    this._authMap = authMap;
     this._statusBar = statusBar;
   }
 
   _getAuthForFamily(family) {
-    if (family === "deepseek") return this._deepseekAuth;
-    if (family === "qwen") return this._qwenAuth;
+    if (family in this._authMap) return this._authMap[family];
     throw new Error(`Unsupported model family: ${family}`);
   }
 
@@ -90,11 +92,10 @@ class AiFreeVscodeChatModelProvider {
   ) {
     const convertedMessages = convertMessages(messages);
     const tools = convertToolSchemas(options?.tools);
-    const MAX_DEEPSEEK_CHARS = 180_000;
     const prompt = messagesToPrompt(
       convertedMessages,
       tools.length ? tools : null,
-      model.family === "deepseek" ? MAX_DEEPSEEK_CHARS : 0,
+      0,
     );
 
     // Stable key for the VS Code chat thread — derived from the first user
@@ -188,10 +189,8 @@ class AiFreeVscodeChatModelProvider {
 
         // Обновляем общий auth-объект (мутация, а не замена ссылки), чтобы
         // изменения были видны и в extension.mjs, и в последующих запросах.
-        if (model.family === "deepseek")
-          Object.assign(this._deepseekAuth, freshAuth);
-        else if (model.family === "qwen")
-          Object.assign(this._qwenAuth, freshAuth);
+        const authObj = this._authMap[model.family];
+        if (authObj) Object.assign(authObj, freshAuth);
         info(`Auto-recovery succeeded for ${model.family}`);
       }
     } catch (e) {
@@ -286,17 +285,13 @@ class AiFreeVscodeChatModelProvider {
 /**
  * Registers the unified AI Free VSCode LM provider in VS Code.
  */
-export function registerLmProvider(context, deepseekAuth, qwenAuth, statusBar) {
+export function registerLmProvider(context, authMap, statusBar) {
   if (!vscode.lm?.registerLanguageModelChatProvider) {
     warn("vscode.lm.registerLanguageModelChatProvider is not available.");
     return;
   }
 
-  const provider = new AiFreeVscodeChatModelProvider(
-    deepseekAuth,
-    qwenAuth,
-    statusBar,
-  );
+  const provider = new AiFreeVscodeChatModelProvider(authMap, statusBar);
   context.subscriptions.push(
     vscode.lm.registerLanguageModelChatProvider(VENDOR, provider),
   );

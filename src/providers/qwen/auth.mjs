@@ -43,6 +43,15 @@ export function writeSavedAuth({ token }) {
 
 /** Launches real Chrome or Chromium with automation detection disabled. */
 async function launchContext(chromium) {
+  // Remove Chromium's SingletonLock to avoid "browser has been closed" errors
+  // when the previous session was not cleanly terminated.
+  const lockFile = path.join(BROWSER_PROFILE, "SingletonLock");
+  try {
+    fs.rmSync(lockFile, { force: true });
+  } catch {
+    // ignore — lock may not exist
+  }
+
   const opts = {
     headless: false,
     viewport: null,
