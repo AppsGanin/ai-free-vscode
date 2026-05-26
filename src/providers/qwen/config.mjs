@@ -10,6 +10,9 @@ export const CREATE_CHAT_PATH = "/api/v2/chats/new";
 /** Chat completions API path */
 export const CHAT_API_PATH = "/api/v2/chat/completions";
 
+/** Server-side stop completion API path */
+export const STOP_API_PATH = "/api/v2/chat/completions/stop";
+
 /** Path to the auth persistence file */
 export const AUTH_FILE = path.join(os.homedir(), ".qwen-copilot-auth.json");
 

@@ -79,6 +79,17 @@ export function parseToolCalls(text) {
     if (name) pushCall(name, extractArgs(parsed));
   }
 
+  // Malformed raw snippet (opening quote/brace may be missing):
+  // name": "read_file", "arguments": {...}}
+  // "name": "read_file", "arguments": {...}
+  const looseNameArgsRe =
+    /(?:^|\n)\s*\{?\s*"?name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*(\{[\s\S]*?\})\s*\}?\s*(?=\n|```|$)/g;
+  while ((m = looseNameArgsRe.exec(text)) !== null) {
+    const name = m[1];
+    const args = tryJson(m[2]);
+    if (name) pushCall(name, args ?? {});
+  }
+
   if (calls.length > 0) return calls;
 
   // =========================================================

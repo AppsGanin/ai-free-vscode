@@ -15,6 +15,7 @@ import {
   CHAT_API_PATH,
   CREATE_CHAT_PATH,
   BASE_URL as QWEN_BASE,
+  STOP_API_PATH,
 } from "./config.mjs";
 import { baseHeaders } from "./headers.mjs";
 
@@ -91,6 +92,7 @@ export class QwenClient {
     prompt,
     onText,
     onThinking,
+    onResponseId,
     signal,
   }) {
     const throwIfAborted = () => {
@@ -124,6 +126,11 @@ export class QwenClient {
     try {
       const userMsgId = randomUUID();
       const childId = randomUUID();
+
+      // Provide an early response identifier for stop_stream.
+      // In early abort scenarios SSE may not emit response_id yet, but Qwen
+      // accepts this generated childId as the response branch identifier.
+      if (onResponseId) onResponseId(childId);
 
       const thinkingEnabled = true;
 
@@ -280,6 +287,13 @@ export class QwenClient {
             chunkCount++;
           }
 
+          const responseId =
+            parsed?.response_id ??
+            parsed?.choices?.[0]?.response_id ??
+            parsed?.choices?.[0]?.id ??
+            (typeof parsed?.id === "string" ? parsed.id : null);
+          if (responseId && onResponseId) onResponseId(responseId);
+
           // Stream-level error codes
           if (parsed.code) {
             if (parsed.code === "RateLimited") {
@@ -344,6 +358,43 @@ export class QwenClient {
       if (signal) {
         signal.removeEventListener?.("abort", onAbort);
       }
+    }
+  }
+
+  /**
+   * Best-effort server-side cancel of active completion.
+   * @param {{ chatId: string, responseId?: string | null }} opts
+   */
+  async stopStream({ chatId, responseId = null }) {
+    const payload = { chat_id: chatId };
+    if (responseId) payload.response_id = responseId;
+
+    const body = JSON.stringify(payload);
+    const headers = this._headers({
+      "Content-Length": String(Buffer.byteLength(body)),
+    });
+
+    const url = `${QWEN_BASE}${STOP_API_PATH}?chat_id=${encodeURIComponent(chatId)}`;
+    const res = await httpsRequest(url, "POST", headers, body, undefined);
+    const text = await readBody(res);
+
+    if (res.statusCode === 401 || res.statusCode === 403) {
+      const err = new Error(
+        `Qwen stopStream: auth error HTTP ${res.statusCode}`,
+      );
+      err.isAuthError = true;
+      throw err;
+    }
+    if (res.statusCode >= 400) {
+      throw new Error(
+        `Qwen stopStream HTTP ${res.statusCode}: ${text.slice(0, 300)}`,
+      );
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { raw: text };
     }
   }
 }

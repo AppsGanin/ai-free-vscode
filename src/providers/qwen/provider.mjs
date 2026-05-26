@@ -1,4 +1,4 @@
-import { isDebugMode } from "../../utils/logger.mjs";
+import { debug, info, isDebugMode } from "../../utils/logger.mjs";
 import { QwenClient } from "./client.mjs";
 const T = "Qwen via browser session (no API key)";
 
@@ -237,6 +237,14 @@ export const MODELS = [
 /** threadKey → chatId cache so the same VS Code thread reuses one Qwen chat */
 const chatIdCache = new Map();
 
+function isAbortError(err) {
+  return (
+    err?.name === "AbortError" ||
+    err?.code === "ABORT_ERR" ||
+    /abort/i.test(String(err?.message ?? ""))
+  );
+}
+
 export async function runComplete({
   modelId,
   prompt,
@@ -259,6 +267,43 @@ export async function runComplete({
   const apiModel = MODELS.find((m) => m.id === modelId)?.id ?? modelId;
   const cacheKey = threadKey ?? modelId;
 
+  const runWithServerCancel = async (chatIdToUse) => {
+    let lastResponseId = null;
+    try {
+      const completeOptions = {
+        model: apiModel,
+        chatId: chatIdToUse,
+        prompt,
+        onText,
+        signal,
+        onResponseId: (id) => {
+          if (id) lastResponseId = id;
+        },
+      };
+      if (onThinking) {
+        completeOptions.onThinking = onThinking;
+      }
+      await client.complete(completeOptions);
+    } catch (err) {
+      if (signal?.aborted || isAbortError(err)) {
+        try {
+          await client.stopStream({
+            chatId: chatIdToUse,
+            responseId: lastResponseId,
+          });
+          info(
+            `[QWEN_STOP] sent chatId=${chatIdToUse} responseId=${lastResponseId ?? "(none)"}`,
+          );
+        } catch (stopErr) {
+          debug(
+            `[QWEN_STOP] failed chatId=${chatIdToUse}: ${stopErr?.message || stopErr}`,
+          );
+        }
+      }
+      throw err;
+    }
+  };
+
   console.debug(
     `[qwen] apiModel=${apiModel} cacheKey=${cacheKey} messagesCount=${messagesCount}`,
   );
@@ -273,17 +318,7 @@ export async function runComplete({
   if (cachedChatId) {
     console.debug(`[qwen] reusing chatId=${cachedChatId}`);
     try {
-      const completeOptions = {
-        model: apiModel,
-        chatId: cachedChatId,
-        prompt,
-        onText,
-        signal,
-      };
-      if (onThinking) {
-        completeOptions.onThinking = onThinking;
-      }
-      await client.complete(completeOptions);
+      await runWithServerCancel(cachedChatId);
       return;
     } catch (err) {
       // User/request cancellation must stop immediately — do not fallback.
@@ -312,15 +347,5 @@ export async function runComplete({
   const newChatId = await client.createChat(apiModel, signal);
   chatIdCache.set(cacheKey, newChatId);
   console.debug(`[qwen] new chatId=${newChatId}`);
-  const completeOptions = {
-    model: apiModel,
-    chatId: newChatId,
-    prompt,
-    onText,
-    signal,
-  };
-  if (onThinking) {
-    completeOptions.onThinking = onThinking;
-  }
-  await client.complete(completeOptions);
+  await runWithServerCancel(newChatId);
 }

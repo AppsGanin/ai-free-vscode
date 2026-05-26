@@ -20,6 +20,10 @@ export const MODELS = [
 /** threadKey → sessionId cache so the same VS Code thread reuses one DeepSeek session */
 const sessionIdCache = new Map();
 
+function isAbortError(err) {
+  return err?.name === "AbortError" || err?.code === "ABORT_ERR";
+}
+
 /**
  * Runs a DeepSeek completion and streams text via onText().
  * Throws an error with `isNotSignedIn=true` if auth is missing.
@@ -87,6 +91,8 @@ export async function runComplete({
    * Returns false when the session appears stale (caller should retry with new session).
    */
   async function attempt(sessionId) {
+    let lastMessageId = null;
+
     try {
       await client.complete({
         sessionId,
@@ -95,6 +101,9 @@ export async function runComplete({
         thinkingEnabled: params.thinkingEnabled,
         searchEnabled: false,
         onText,
+        onMessageId: (id) => {
+          if (typeof id === "number") lastMessageId = id;
+        },
         signal,
       });
       info("DeepSeek completion completed successfully", {
@@ -103,6 +112,26 @@ export async function runComplete({
       });
       return true;
     } catch (completionErr) {
+      // Real server-side cancel on local abort.
+      if (signal?.aborted || isAbortError(completionErr)) {
+        try {
+          await client.stopStream({
+            sessionId,
+            messageId: lastMessageId,
+          });
+          info("DeepSeek stop_stream sent", {
+            modelId,
+            sessionId,
+            messageId: lastMessageId,
+          });
+        } catch (stopErr) {
+          debug(
+            `DeepSeek stop_stream failed for ${sessionId}: ${stopErr?.message || stopErr}`,
+          );
+        }
+        throw completionErr;
+      }
+
       // Treat session-not-found or auth errors as stale session
       if (
         completionErr.isAuthError ||

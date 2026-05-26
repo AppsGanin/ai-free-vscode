@@ -1,5 +1,5 @@
 import { httpsRequest, readBody } from "../../utils/https.mjs";
-import { BASE_URL, COMPLETION_PATH } from "./config.mjs";
+import { BASE_URL, COMPLETION_PATH, STOP_STREAM_PATH } from "./config.mjs";
 import { baseHeaders } from "./headers.mjs";
 import { solvePow } from "./pow.mjs";
 import { streamSseFromNodeResponse } from "./sse.mjs";
@@ -118,6 +118,7 @@ export class DeepSeekClient {
     thinkingEnabled = false,
     searchEnabled = false,
     onText = null,
+    onMessageId = null,
     signal = undefined,
   }) {
     const pow = await this.createPowHeader(COMPLETION_PATH, { signal });
@@ -178,9 +179,28 @@ export class DeepSeekClient {
       res,
       this.debug,
       onText,
-      null,
+      onMessageId,
       signal,
     );
+  }
+
+  /**
+   * Best-effort server-side cancel of an active stream.
+   * @param {{ sessionId: string; messageId?: number | null }} opts
+   */
+  async stopStream({ sessionId, messageId = null }) {
+    const body = { chat_session_id: sessionId };
+    if (typeof messageId === "number" && Number.isFinite(messageId)) {
+      body.message_id = messageId;
+    }
+
+    return this._request(STOP_STREAM_PATH, {
+      method: "POST",
+      body,
+      // Do not pass aborted request signal here, otherwise cancel request
+      // itself gets aborted immediately and never reaches server.
+      signal: undefined,
+    });
   }
 }
 

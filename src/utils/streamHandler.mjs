@@ -155,7 +155,14 @@ export class ResponseStreamHandler {
     // \n{"name": fence detection fires correctly.
     if (this._hasTools && this._streamFilter.inToolCall === false) {
       const trimmed = this.fullText.trimStart();
-      if (trimmed.startsWith('{"name":') || trimmed.startsWith('{"name" :')) {
+      if (
+        trimmed.startsWith('{"name":') ||
+        trimmed.startsWith('{"name" :') ||
+        trimmed.startsWith('"name":') ||
+        trimmed.startsWith('"name" :') ||
+        trimmed.startsWith('name":') ||
+        trimmed.startsWith('name" :')
+      ) {
         this._streamFilter.feed("\n");
       }
     }
@@ -187,7 +194,14 @@ export class ResponseStreamHandler {
     // Suppress tool_call markup leaking into thinking stream
     if (this._hasTools && this._thinkingFilter.inToolCall === false) {
       const trimmed = text.trimStart();
-      if (trimmed.startsWith('{"name":') || trimmed.startsWith('{"name" :')) {
+      if (
+        trimmed.startsWith('{"name":') ||
+        trimmed.startsWith('{"name" :') ||
+        trimmed.startsWith('"name":') ||
+        trimmed.startsWith('"name" :') ||
+        trimmed.startsWith('name":') ||
+        trimmed.startsWith('name" :')
+      ) {
         this._thinkingFilter.feed("\n");
       }
     }

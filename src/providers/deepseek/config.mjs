@@ -8,6 +8,9 @@ export const BASE_URL = "https://chat.deepseek.com";
 /** Completion API path */
 export const COMPLETION_PATH = "/api/v0/chat/completion";
 
+/** Stop streaming API path (server-side cancel) */
+export const STOP_STREAM_PATH = "/api/v0/chat/stop_stream";
+
 /** Application version */
 export const APP_VERSION = "1.0.2";
 
