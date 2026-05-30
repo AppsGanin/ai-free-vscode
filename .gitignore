@@ -4,4 +4,4 @@ auth.json
 *.log
 .copilot-specs-cache/
 .idea/
-.vscode/
+.dist/

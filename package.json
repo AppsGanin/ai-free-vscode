@@ -1,16 +1,22 @@
 {
   "name": "ai-free-vscode",
-  "displayName": "AI Free VSCode",
-  "version": "0.1.1",
+  "displayName": "AI Free VSCode for Copilot Chat",
+  "description": "Use free AI models directly in Copilot Chat",
+  "version": "0.3.0",
+  "publisher": "ai-free-vscode",
+  "license": "MIT",
   "private": false,
   "repository": {
     "type": "git",
     "url": "https://github.com/AppsGanin/ai-free-vscode"
   },
-  "type": "module",
   "icon": "media/icon.png",
-  "description": "Free AI models in Copilot Chat via browser authentication. No API keys required.",
-  "publisher": "local",
+  "engines": {
+    "vscode": "^1.105.0"
+  },
+  "extensionKind": [
+    "ui"
+  ],
   "categories": [
     "AI",
     "Chat"
@@ -18,221 +24,84 @@
   "activationEvents": [
     "onStartupFinished"
   ],
-  "main": "./src/extension.mjs",
+  "main": "./dist/extension.js",
   "contributes": {
-    "configuration": {
-      "title": "AI Free VSCode",
-      "properties": {
-        "ai-free-vscode.debug": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable debug logging to console"
-        }
-      }
-    },
     "languageModelChatProviders": [
       {
         "vendor": "ai-free-vscode",
-        "displayName": "AI Free VSCode",
-        "models": [
-          {
-            "id": "deepseek-default",
-            "name": "DeepSeek (default)",
-            "maxInputTokens": 131072,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen3.6-plus",
-            "name": "Qwen3.6-Plus",
-            "maxInputTokens": 1000000,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen3.6-max-preview",
-            "name": "Qwen3.6-Max-Preview",
-            "maxInputTokens": 262144,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen3.6-plus-preview",
-            "name": "Qwen3.6-Plus-Preview",
-            "maxInputTokens": 1000000,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen3.6-35b-a3b",
-            "name": "Qwen3.6-35B-A3B",
-            "maxInputTokens": 262144,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen3.6-27b",
-            "name": "Qwen3.6-27B",
-            "maxInputTokens": 262144,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen3.7-max",
-            "name": "Qwen3.7-Max",
-            "maxInputTokens": 1000000,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen-latest-series-invite-beta-v24",
-            "name": "Qwen3.7-Max-Preview",
-            "maxInputTokens": 262144,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen-latest-series-invite-beta-v16",
-            "name": "Qwen3.7-Plus-Preview",
-            "maxInputTokens": 1000000,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen3.5-plus",
-            "name": "Qwen3.5-Plus",
-            "maxInputTokens": 1000000,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen3.5-max-2026-03-08",
-            "name": "Qwen3.5-Max-Preview",
-            "maxInputTokens": 262144,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen3.5-flash",
-            "name": "Qwen3.5-Flash",
-            "maxInputTokens": 1000000,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen3.5-397b-a17b",
-            "name": "Qwen3.5-397B-A17B",
-            "maxInputTokens": 262144,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen3.5-122b-a10b",
-            "name": "Qwen3.5-122B-A10B",
-            "maxInputTokens": 262144,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen3.5-27b",
-            "name": "Qwen3.5-27B",
-            "maxInputTokens": 262144,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen3.5-35b-a3b",
-            "name": "Qwen3.5-35B-A3B",
-            "maxInputTokens": 262144,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen3-max-2026-01-23",
-            "name": "Qwen3-Max",
-            "maxInputTokens": 262144,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen-plus-2025-07-28",
-            "name": "Qwen3-235B-A22B-2507",
-            "maxInputTokens": 131072,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen3-coder-plus",
-            "name": "Qwen3-Coder",
-            "maxInputTokens": 1048576,
-            "capabilities": {
-              "chat": true
-            }
-          },
-          {
-            "id": "qwen-max-latest",
-            "name": "Qwen2.5-Max",
-            "maxInputTokens": 131072,
-            "capabilities": {
-              "chat": true
-            }
-          }
-        ]
+        "displayName": "AI Free VSCode"
       }
     ],
     "commands": [
       {
-        "command": "deepseek.login",
-        "title": "AI Free VSCode: DeepSeek: Sign In (Playwright)"
+        "command": "ai-free-vscode.login",
+        "title": "AI Free VSCode — Войти (Sign In)"
       },
       {
-        "command": "deepseek.logout",
-        "title": "AI Free VSCode: DeepSeek: Sign Out"
+        "command": "ai-free-vscode.logout",
+        "title": "AI Free VSCode — Выйти (Sign Out)"
       },
       {
-        "command": "qwen.login",
-        "title": "AI Free VSCode: Qwen: Sign In (Playwright)"
+        "command": "ai-free-vscode.status",
+        "title": "AI Free VSCode — Статус авторизации"
       },
       {
-        "command": "qwen.logout",
-        "title": "AI Free VSCode: Qwen: Sign Out"
+        "command": "ai-free-vscode.manage",
+        "title": "AI Free VSCode — Управление аккаунтом"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "AI Free VSCode",
+      "properties": {
+        "freeAI.playwright.timeout": {
+          "type": "number",
+          "default": 120000,
+          "description": "Таймаут ожидания авторизации в браузере (мс)"
+        },
+        "freeAI.qwen.thinkingMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "default": "auto",
+          "description": "Режим thinking для Qwen: auto = выключать при tools, on = всегда включать, off = всегда выключать"
+        },
+        "freeAI.qwen.thinkingBudgetTokens": {
+          "type": "number",
+          "default": 4096,
+          "minimum": 256,
+          "description": "Лимит токенов для thinking (используется когда thinking включен)"
+        },
+        "freeAI.deepseek.thinkingMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "default": "auto",
+          "description": "Режим thinking для DeepSeek: auto = выключать при tools, on = всегда включать, off = всегда выключать"
+        }
+      }
+    }
   },
   "scripts": {
-    "postinstall": "npx playwright install chromium",
-    "package": "vsce package --allow-missing-repository"
-  },
-  "enabledApiProposals": [
-    "chatProvider",
-    "languageModelThinkingPart"
-  ],
-  "engines": {
-    "vscode": "^1.103.0",
-    "node": ">=18"
-  },
-  "dependencies": {
-    "playwright": "^1.60.0"
+    "vscode:prepublish": "npm run bundle",
+    "compile": "tsc --noEmit",
+    "bundle": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "vsce package"
   },
   "devDependencies": {
-    "esbuild": "^0.28.0"
+    "@types/node": "^20.19.41",
+    "@types/vscode": "^1.105.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "playwright": "^1.52.0"
   }
 }

@@ -4,261 +4,128 @@
 [![GitHub forks](https://img.shields.io/github/forks/AppsGanin/ai-free-vscode.svg)](https://github.com/AppsGanin/ai-free-vscode/network)
 [![GitHub watchers](https://img.shields.io/github/watchers/AppsGanin/ai-free-vscode.svg?style=social)](https://github.com/AppsGanin/ai-free-vscode/watchers)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![VS Code](https://img.shields.io/badge/VS_Code-%5E1.103.0-success.svg)](https://code.visualstudio.com)
-[![Last Commit](https://img.shields.io/github/last-commit/AppsGanin/ai-free-vscode.svg)](https://github.com/AppsGanin/ai-free-vscode/commits/main)
+[![VS Code](https://img.shields.io/badge/VS_Code-%5E1.105.0-success.svg)](https://code.visualstudio.com)
 
-> **Tired of managing API keys, paying per token, and hitting rate limits?**
-> There's a better way.
+> Use free AI models directly in Copilot Chat without API keys, billing, or token counting.
 
-**AI Free VSCode** brings powerful AI models directly into VS Code Copilot Chat — using your existing **free web account**. No API keys. No billing. No token counting. Just sign in once through a browser and start chatting.
+**AI Free VSCode** connects free web-based models through a Playwright browser session and registers them as a Copilot Chat provider.
 
-- ✅ **Zero cost** — uses the same free tier you already get on the website
-- ✅ **No API keys** — authentication works through a real browser session (Playwright)
-- ✅ **Native VS Code integration** — models appear directly in Copilot Chat model picker
-- ✅ **Agent mode support** — full tool calling, file reads, multi-step tasks
-- ✅ **Context window indicator** — VS Code shows actual token usage in the chat UI
+## What it does
 
-Sign in once. Use forever.
+- ✅ Integrates free Qwen and DeepSeek models into Copilot Chat
+- ✅ Requires no API keys and does not use paid OpenAI endpoints
+- ✅ Authenticates via a real browser session
+- ✅ Supports streaming, thinking mode, and tool calling
+- ✅ Exposes models through a unified provider for VS Code
 
-## 🤖 Models
+## Supported models
+
+### Qwen
+
+| Model | ID | Context |
+| --- | --- | --- |
+| Qwen3.7 Max | `qwen3.7-max` | 1M |
+| Qwen3.7 Max (Preview) | `qwen-latest-series-invite-beta-v24` | 256K |
+| Qwen3.7 Plus (Preview) | `qwen-latest-series-invite-beta-v16` | 1M |
+| Qwen3.6 Plus | `qwen3.6-plus` | 1M |
+| Qwen3.6 Max (Preview) | `qwen3.6-max-preview` | 256K |
+| Qwen3.6 Plus (Preview) | `qwen3.6-plus-preview` | 1M |
+| Qwen3.6 27B | `qwen3.6-27b` | 256K |
+| Qwen3.6 35B-A3B | `qwen3.6-35b-a3b` | 256K |
+| Qwen3.5 Plus | `qwen3.5-plus` | 1M |
+| Qwen3.5 Flash | `qwen3.5-flash` | 1M |
+| Qwen3.5 Max (Preview) | `qwen3.5-max-2026-03-08` | 256K |
+| Qwen3.5 397B-A17B | `qwen3.5-397b-a17b` | 256K |
+| Qwen3.5 122B-A10B | `qwen3.5-122b-a10b` | 256K |
+| Qwen3.5 35B-A3B | `qwen3.5-35b-a3b` | 256K |
+| Qwen3.5 27B | `qwen3.5-27b` | 256K |
+| Qwen3 Max | `qwen3-max-2026-01-23` | 256K |
+| Qwen3 235B-A22B | `qwen-plus-2025-07-28` | 128K |
+| Qwen3 Coder | `qwen3-coder-plus` | 1M |
+| Qwen3 VL 235B-A22B | `qwen3-vl-plus` | 262K |
+| Qwen3 Omni Flash | `qwen3-omni-flash-2025-12-01` | 65K |
+| Qwen2.5 Max | `qwen-max-latest` | 128K |
 
 ### DeepSeek
 
-| Model    | ID                 | Context |
-| -------- | ------------------ | ------- |
-| DeepSeek | `deepseek-default` | 128K    |
+| Model | ID | Context |
+| --- | --- | --- |
+| DeepSeek | `deepseek-default` | 128K |
 
-### Qwen3.7 (latest)
+## How it works
 
-| Model                | ID                                   | Context |
-| -------------------- | ------------------------------------ | ------- |
-| Qwen3.7-Max          | `qwen3.7-max`                        | 1M      |
-| Qwen3.7-Max-Preview  | `qwen-latest-series-invite-beta-v24` | 256K    |
-| Qwen3.7-Plus-Preview | `qwen-latest-series-invite-beta-v16` | 1M      |
-
-### Qwen3.6
-
-| Model                | ID                     | Context |
-| -------------------- | ---------------------- | ------- |
-| Qwen3.6-Plus         | `qwen3.6-plus`         | 1M      |
-| Qwen3.6-Plus-Preview | `qwen3.6-plus-preview` | 1M      |
-| Qwen3.6-Max-Preview  | `qwen3.6-max-preview`  | 256K    |
-| Qwen3.6-35B-A3B      | `qwen3.6-35b-a3b`      | 256K    |
-| Qwen3.6-27B          | `qwen3.6-27b`          | 256K    |
-
-### Qwen3.5
-
-| Model               | ID                       | Context |
-| ------------------- | ------------------------ | ------- |
-| Qwen3.5-Plus        | `qwen3.5-plus`           | 1M      |
-| Qwen3.5-Flash       | `qwen3.5-flash`          | 1M      |
-| Qwen3.5-Max-Preview | `qwen3.5-max-2026-03-08` | 256K    |
-| Qwen3.5-397B-A17B   | `qwen3.5-397b-a17b`      | 256K    |
-| Qwen3.5-122B-A10B   | `qwen3.5-122b-a10b`      | 256K    |
-| Qwen3.5-35B-A3B     | `qwen3.5-35b-a3b`        | 256K    |
-| Qwen3.5-27B         | `qwen3.5-27b`            | 256K    |
-
-### Qwen3
-
-| Model           | ID                     | Context |
-| --------------- | ---------------------- | ------- |
-| Qwen3-Max       | `qwen3-max-2026-01-23` | 256K    |
-| Qwen3-235B-A22B | `qwen-plus-2025-07-28` | 128K    |
-| Qwen3-Coder     | `qwen3-coder-plus`     | 1M      |
-
-### Qwen2.5
-
-| Model       | ID                | Context |
-| ----------- | ----------------- | ------- |
-| Qwen2.5-Max | `qwen-max-latest` | 128K    |
-
-## 🔧 How It Works
-
-1. User selects a model in Copilot Chat
-2. Request is routed to the matching provider
-3. Playwright loads the stored browser session with cookies
-4. API request is sent with proper authentication headers
-5. SSE stream is read chunk by chunk and forwarded to VS Code
-6. Tool calls are detected mid-stream and emitted as native `ToolCallPart`
-7. Thinking blocks are emitted as collapsible `ThinkingPart`
-8. Token usage is reported at the end so VS Code displays the context window indicator
+1. The extension registers a single Copilot Chat provider: `ai-free-vscode`.
+2. Signing in launches Playwright and stores the authenticated session in `SecretStorage`.
+3. Requests are routed through private Qwen and DeepSeek API streams.
+4. Responses are delivered to VS Code as streamed chunks.
+5. The extension handles tool calling and thinking-mode when available.
 
 ## Installation
 
-1. Go to the [Releases](https://github.com/AppsGanin/ai-free-vscode/releases) page and download the latest `ai-free-vscode-*.vsix`.
-2. In VS Code: **Extensions** panel → `···` menu → **Install from VSIX...** → select the file.
-3. Reload VS Code when prompted.
+1. Download the latest `ai-free-vscode-*.vsix` from the Releases page.
+2. In VS Code, open Extensions → `···` → **Install from VSIX...**.
+3. Reload VS Code.
 
-> Chromium is bundled inside the package — no extra setup required.
+## Quick start
 
-## Getting started
+1. Open Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`).
+2. Run the sign-in command:
+   - `AI Free VSCode — Sign In`
+3. Choose a provider: Qwen, DeepSeek, or `All providers`.
+4. Sign in with your browser and wait for success.
+5. Open Copilot Chat and select a model.
 
-1. Open the Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`).
-2. Run the sign-in command for the provider you want to use:
-   - **AI Free VSCode: DeepSeek: Sign In (Playwright)**
-   - **AI Free VSCode: Qwen: Sign In (Playwright)**
-3. A browser window opens — sign in to your account normally.
-4. The window closes automatically once the session is captured.
-5. The model is now available in Copilot Chat — select it from the model picker.
+To sign out:
+- `AI Free VSCode — Sign Out`
 
-To sign out run the corresponding **Sign Out** command from the Command Palette.
+To check auth status:
+- `AI Free VSCode — Status`
 
 ## Configuration
 
-| Setting                | Default | Description                             |
-| ---------------------- | ------- | --------------------------------------- |
-| `ai-free-vscode.debug` | `false` | Enable debug logging to VS Code console |
+| Setting | Default | Description |
+| --- | --- | --- |
+| `freeAI.playwright.timeout` | `120000` | Browser sign-in timeout in milliseconds |
+| `freeAI.qwen.thinkingMode` | `auto` | Qwen thinking mode: `auto`, `on`, `off` |
+| `freeAI.qwen.thinkingBudgetTokens` | `4096` | Token budget for Qwen thinking |
+| `freeAI.deepseek.thinkingMode` | `auto` | DeepSeek thinking mode: `auto`, `on`, `off` |
 
-## ⚙️ Requirements
-
-- **VS Code** 1.103.0 or higher
-- **Free** LLM provider account
-- **Playwright Chromium** (automatically bundled with the extension)
-
-## ❓ FAQ
-
-### Why is this free?
-
-We use your existing free LLM provider account through a Playwright browser session. No API keys or paid subscriptions.
-
-### Is it safe?
-
-Authentication happens through a real browser. The session is stored locally on your machine only. We don't store your credentials.
-
-### Does this work permanently?
-
-May stop working if the LLM provider changes their authentication or APIs. Project is maintained by enthusiasts.
-
-### Can I use my corporate account?
-
-Yes, but make sure it's allowed by your company policy.
-
-### Are there message limits?
-
-Depends on your free tier on the website. Usually very high or unlimited.
-
-### Can I use multiple accounts?
-
-No, the extension supports one active session per provider at a time. To switch, sign out and sign in again.
-
-### How do I update?
-
-Download the latest VSIX from Releases and install it over the existing extension.
-
-## 🏗 Development
+## Development
 
 ```bash
 git clone https://github.com/AppsGanin/ai-free-vscode
 cd ai-free-vscode
-npm install   # also downloads Playwright Chromium
+npm install
+# If you need local Chromium for development:
+npx playwright install chromium
 ```
 
-Press `F5` in VS Code to launch the extension in an Extension Development Host window.
+Run the extension in VS Code with `F5`.
 
-Alternatively, symlink the project into the VS Code extensions folder to use it as a regular installed extension:
+## Project structure
 
-**macOS / Linux:**
+- `src/extension.ts` — extension activation, command registration, provider wiring
+- `src/logger.ts` — shared logging utility for extension output
+- `src/providers/BaseAIProvider.ts` — abstract provider interface for all models
+- `src/providers/types.ts` — shared AI request/response type definitions
+- `src/providers/common/` — shared provider utilities (model resolver, Chromium guard, tool calling helpers)
+- `src/providers/UnifiedProvider.ts` — unified provider combining Qwen + DeepSeek
+- `src/providers/qwen/` — Qwen client, auth manager, and model definitions
+- `src/providers/deepseek/` — DeepSeek client, auth manager, and model definitions
+- `src/vscode/ProviderRegistry.ts` — registers the provider with VS Code LM API
+- `src/vscode/VSCodeLMAdapter.ts` — adapter between VS Code LM API and providers
+- `esbuild.js` — bundles source into `dist/extension.js`
+- `package.json` — extension metadata, commands, and dependencies
+- `tsconfig.json` — TypeScript configuration
 
-```bash
-ln -s /path/to/ai-free-vscode ~/.vscode/extensions/ai-free-vscode
-```
+## Requirements
 
-**Windows (PowerShell, run as Administrator):**
+- VS Code `^1.105.0`
+- System Chrome or network access for Playwright to download Chromium
+- Free Qwen or DeepSeek account for browser sign-in
 
-```powershell
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.vscode\extensions\ai-free-vscode" -Target "C:\path\to\ai-free-vscode"
-```
+## Important notice
 
-Restart VS Code after running the command.
+This is an unofficial extension. Authentication is handled through a browser session, and the integration may break if providers change their web APIs or terms.
 
-### Project Structure
-
-```
-src/
-├── extension.mjs          # Extension entry point, command registration
-├── providers/
-│   ├── AIProvider.mjs     # Base provider interface
-│   ├── AiFreeProvider.mjs # VS Code LM provider — registers models, routes requests
-│   ├── index.mjs          # Provider registry
-│   ├── deepseek/
-│   │   ├── auth.mjs       # Session auth load/save
-│   │   ├── client.mjs     # HTTP client for DeepSeek API
-│   │   ├── config.mjs     # Endpoints and model config
-│   │   ├── headers.mjs    # Request headers builder
-│   │   ├── index.mjs      # Provider wrapper
-│   │   ├── pow.mjs        # Proof-of-work challenge solver
-│   │   ├── provider.mjs   # Model definitions + completion runner
-│   │   └── sse.mjs        # SSE stream parser
-│   ├── qwen/
-│   │   ├── auth.mjs       # Session auth load/save
-│   │   ├── client.mjs     # HTTP client for Qwen API
-│   │   ├── config.mjs     # Endpoints and model config
-│   │   ├── headers.mjs    # Request headers builder
-│   │   ├── index.mjs      # Provider wrapper
-│   │   ├── provider.mjs   # Model definitions + completion runner
-│       ├── index.mjs      # Provider wrapper
-│       └── provider.mjs   # Model definitions + completion runner
-└── utils/
-    ├── promptBuilder.mjs    # Converts VS Code messages → flat text prompt
-    ├── streamHandler.mjs    # Stateful streaming: text, thinking, tool calls, usage
-    ├── toolCallParser.mjs   # Parses tool calls from model output (20+ formats)
-    ├── jsonRepair.mjs       # JSON repair utilities for model-generated output
-    ├── messageConverter.mjs # VS Code LM messages → OpenAI format
-    ├── toolConverter.mjs    # VS Code tool schemas ↔ model tool format
-    ├── streamFilter.mjs     # Suppresses tool_call fences from text stream
-    ├── cancellation.mjs     # AbortController helpers
-    ├── rateLimiter.mjs      # Request rate limiting
-    ├── logger.mjs           # Debug/info/warn/error logging
-    └── https.mjs            # HTTPS request helpers
-```
-
-## About this project
-
-This is a hobby project — built for fun and personal use.
-
-Roughly half the code was written using this extension itself — a fitting feedback loop.
-
-If you'd like to fix something, add a feature, or improve the integration — contributions and collaboration are very welcome. Open an issue or send a PR.
-
-## Support / Donate
-
-If you find this useful and want to support development, any donation is appreciated.
-
-Crypto wallets:
-
-| Network | Token | Address                                            |
-| ------- | ----- | -------------------------------------------------- |
-| TRC20   | USDT  | `TJwyrPVEZVZ1YrcmDiZTyFjLo3Q2DmEGzs`               |
-| ERC20   | USDT  | `0xf9d663146ce902da91911b214c71cc73a5269d1d`       |
-| Solana  | USDT  | `2qAZRTbaUMTfYuZbD1dCYHjkYgxkw4dUYE9XY3JhC2Cs`     |
-| TON     | USDT  | `UQDoat731MLYuIw8ayL3Vhhw7zTBbLvRaQFmDvab--CNNI7e` |
-
-## 🤝 Contributing
-
-Contributions are welcome! Please read our [Contribution Guide](CONTRIBUTING.md) first.
-
-Some areas where you can help:
-
-- Fix bugs (see [open issues](https://github.com/AppsGanin/ai-free-vscode/issues))
-- Improve documentation
-- Add new AI models or providers
-- Enhance UI/UX
-- Write tests
-
-## 🧩 Tech Stack
-
-- **Language**: JavaScript (ES Modules)
-- **Framework**: VS Code Extension API
-- **Browser Automation**: Playwright
-- **Streaming**: SSE
-- **Package Manager**: npm
-
-## ⚠️ Legal Disclaimer
-
-This extension is an independent, unofficial tool and is not affiliated with, endorsed by, or sponsored by any AI provider.
-
-- **Use at your own risk.** Automating web sessions may violate the Terms of Service of the respective platforms. Your account may be rate-limited, restricted, or banned as a result.
-- **No guarantees.** The extension may stop working at any time if providers change their APIs, authentication flows, or access policies.
-- **No liability.** The authors are not responsible for any consequences arising from the use of this extension, including but not limited to account suspension, data loss, or service interruptions.
-
-Always check the Terms of Service of the platforms you use.
+> Use at your own risk. Web session automation may violate provider policies.
