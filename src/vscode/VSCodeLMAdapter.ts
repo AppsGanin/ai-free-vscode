@@ -438,7 +438,9 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
     // markdown code fences с содержимым.
     sanitized = sanitized.replace(/```[a-zA-Z0-9_-]*\s*\n\s*```/g, "\n");
 
-    sanitized = sanitized.replace(/[ \t]{2,}/g, " ");
+    // ВНИМАНИЕ: не схлопываем горизонтальные пробелы (` `/`\t`). Санитайзер
+    // вызывается на каждом частичном чанке стрима, и `/[ \t]{2,}/ → " "` съедал
+    // отступы кода и выровненный текст — это выглядело как "пропавшие символы".
     sanitized = sanitized.replace(/\n{3,}/g, "\n\n");
 
     return sanitized;

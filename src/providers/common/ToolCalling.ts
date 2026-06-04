@@ -58,6 +58,49 @@ export function findToolCallMarkerStart(
     }
   }
 
+  // Дополнительно распознаём начало "сырого" JSON tool call вида
+  // {"name": "...", "arguments": {...}}. Модели часто выводят его без обёртки
+  // ```tool_call / <tool_call>, и без этой проверки он утекал бы в чат как
+  // обычный текст вместо структурного вызова инструмента.
+  const jsonStart = findJsonToolCallStart(text);
+  if (jsonStart !== -1 && (earliest === -1 || jsonStart < earliest)) {
+    earliest = jsonStart;
+  }
+
+  return earliest;
+}
+
+// Полное вхождение начала JSON tool-call объекта (с учётом пробелов): {"name":
+const JSON_TOOLCALL_START_RE = /\{\s*"name"\s*:/;
+// Компактная форма для распознавания частичного префикса в конце чанка.
+const JSON_TOOLCALL_PARTIAL = '{"name"';
+// Минимальная длина частичного префикса JSON tool call ({"nam...), чтобы не
+// реагировать на любой одиночный символ "{" в обычном тексте/коде.
+const MIN_PARTIAL_JSON_TOOLCALL_LEN = 5;
+
+/**
+ * Возвращает индекс начала JSON tool-call объекта ({"name": ...) в тексте,
+ * включая частичный префикс в конце строки (объект мог быть разбит по SSE
+ * чанкам), либо -1.
+ */
+function findJsonToolCallStart(text: string): number {
+  const full = JSON_TOOLCALL_START_RE.exec(text);
+  let earliest = full ? full.index : -1;
+
+  for (
+    let len = Math.min(JSON_TOOLCALL_PARTIAL.length - 1, text.length);
+    len >= MIN_PARTIAL_JSON_TOOLCALL_LEN;
+    len--
+  ) {
+    if (text.endsWith(JSON_TOOLCALL_PARTIAL.slice(0, len))) {
+      const start = text.length - len;
+      if (earliest === -1 || start < earliest) {
+        earliest = start;
+      }
+      break;
+    }
+  }
+
   return earliest;
 }
 
@@ -408,7 +451,11 @@ function parseLooseJsonToolCallsFromText(text: string): {
     const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
     if (!name) continue;
 
-    const argsRaw = parsed.arguments ?? parsed.params ?? parsed.input ?? {};
+    // Требуем явное поле аргументов: произвольный JSON с полем "name", но без
+    // arguments/params/input — это данные, а не вызов инструмента.
+    const argsRaw = parsed.arguments ?? parsed.params ?? parsed.input;
+    if (argsRaw === undefined) continue;
+
     calls.push(
       createToolCallChunk({
         name,

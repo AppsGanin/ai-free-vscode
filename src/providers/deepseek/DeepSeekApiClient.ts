@@ -27,6 +27,10 @@ const DEEPSEEK_SHA3_WASM =
 
 const STREAM_TIMEOUT_MS = 30000;
 const TOOL_MARKER_HOLDBACK_CHARS = 11;
+// Если hold-буфер вырос настолько — это почти наверняка ложное срабатывание
+// маркера (обычный markdown/код), а не tool call. Сбрасываем как текст, чтобы
+// не ждать конца SSE-потока.
+const MAX_TOOLCALL_HOLD_BUFFER_CHARS = 4096;
 
 export interface DeepSeekAuthState {
   token?: string;
@@ -285,6 +289,15 @@ export class DeepSeekApiClient {
 
       if (toolCallHoldActive) {
         toolCallHoldBuffer += rawText;
+        if (toolCallHoldBuffer.length >= MAX_TOOLCALL_HOLD_BUFFER_CHARS) {
+          const sanitized = stripDanglingToolCallMarkers(toolCallHoldBuffer);
+          if (sanitized) {
+            emittedTextChunks++;
+            yield { type: "text", content: sanitized };
+          }
+          toolCallHoldBuffer = "";
+          toolCallHoldActive = false;
+        }
         return;
       }
 
@@ -477,31 +490,49 @@ export class DeepSeekApiClient {
     }
 
     if (allowToolCalls) {
-      const parseBuffer = toolCallHoldActive
-        ? toolCallHoldBuffer
-        : pendingBuffer;
-      const parsedChunks = Array.from(parseToolCallsFromText(parseBuffer));
-      const hasToolCalls = parsedChunks.some((c) => c.type === "tool_call");
-      const sanitizedTextRemainder = sanitizeProtocolTranscript(
-        stripDanglingToolCallMarkers(parseBuffer),
-      );
+      // Текст, удержанный маркером (потенциальный tool call), и обычный
+      // holdback-хвост разделяем явно. Сбрасываем состояние, чтобы прямые yield
+      // ниже не попали обратно в hold-буфер.
+      const holdBuffer = toolCallHoldActive ? toolCallHoldBuffer : "";
+      const tailText = toolCallHoldActive ? "" : pendingBuffer;
+      pendingBuffer = "";
+      toolCallHoldBuffer = "";
+      toolCallHoldActive = false;
 
-      if (hasToolCalls) {
-        for (const chunk of parsedChunks) {
-          if (chunk.type === "tool_call") {
+      if (holdBuffer) {
+        const parsedChunks = Array.from(parseToolCallsFromText(holdBuffer));
+        const toolChunks = parsedChunks.filter((c) => c.type === "tool_call");
+        const sanitizedTextRemainder = sanitizeProtocolTranscript(
+          stripDanglingToolCallMarkers(holdBuffer),
+        );
+
+        if (toolChunks.length > 0) {
+          for (const chunk of toolChunks) {
             yield chunk;
           }
-        }
 
-        // Важно: DeepSeek может присылать обычный текст рядом с tool call.
-        // Раньше он терялся полностью, поэтому теперь отдаём очищенный остаток.
-        if (sanitizedTextRemainder) {
-          yield* routeTextChunk(sanitizedTextRemainder);
+          // DeepSeek может присылать обычный текст рядом с tool call. Отдаём
+          // очищенный остаток НАПРЯМУЮ — через routeTextChunk он бы снова попал
+          // в hold-буфер и потерялся.
+          if (sanitizedTextRemainder) {
+            emittedTextChunks++;
+            yield { type: "text", content: sanitizedTextRemainder };
+          }
+        } else {
+          // Ложное срабатывание маркера. Если очистка оставила пусто —
+          // отдаём исходный буфер, чтобы не получить пустой ответ.
+          const textOut = sanitizedTextRemainder || holdBuffer.trim();
+          if (textOut) {
+            emittedTextChunks++;
+            yield { type: "text", content: textOut };
+          }
         }
-      } else {
-        if (sanitizedTextRemainder) {
-          yield* routeTextChunk(sanitizedTextRemainder);
-        }
+      }
+
+      // Обычный holdback-хвост (без маркера) отдаём как есть.
+      if (tailText) {
+        emittedTextChunks++;
+        yield { type: "text", content: tailText };
       }
       return;
     }

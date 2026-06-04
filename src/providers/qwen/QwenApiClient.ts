@@ -1027,9 +1027,12 @@ export class QwenApiClient {
       log(`[qwen-api] line[${i}]: ${firstLines[i].slice(0, 200)}`);
     }
 
+    let emittedAnything = streamedTextChars > 0;
+
     if (allowToolCalls && nativeToolCalls.length > 0) {
       log(`[qwen-api] native toolCalls=${nativeToolCalls.length}`);
       yield* nativeToolCalls;
+      emittedAnything = true;
     } else if (allowToolCalls && toolCallHoldActive) {
       // Маркер был найден — парсим буферизованный текст
       log(
@@ -1041,23 +1044,32 @@ export class QwenApiClient {
           logPrefix: "[qwen-api] ",
         }),
       );
-      const hasToolCalls = parsedChunks.some((c) => c.type === "tool_call");
+      const toolChunks = parsedChunks.filter((c) => c.type === "tool_call");
 
-      if (hasToolCalls) {
-        for (const c of parsedChunks) {
-          if (c.type === "tool_call") {
-            yield c;
-          }
+      if (toolChunks.length > 0) {
+        for (const c of toolChunks) {
+          yield c;
         }
+        emittedAnything = true;
       } else {
-        // Ложное срабатывание (например, code block с ```) — отдаём текст
-        const sanitized = stripDanglingToolCallMarkers(toolCallHoldBuffer);
+        // Ложное срабатывание (например, code block с ```) — отдаём текст.
+        // Если очистка маркеров оставила пусто, используем исходный буфер,
+        // чтобы не получить пустой ответ в чате.
+        const sanitized =
+          stripDanglingToolCallMarkers(toolCallHoldBuffer) ||
+          toolCallHoldBuffer.trim();
         if (sanitized) {
           streamedTextChars += sanitized.length;
           yield { type: "text", content: sanitized };
+          emittedAnything = true;
         }
       }
-    } else if (streamedTextChars === 0 && fullText.trim()) {
+    }
+
+    // Гарантированный фолбэк: если пользователю не отдали ничего (ни текста,
+    // ни tool call), но модель что-то сгенерировала — отдаём накопленный текст,
+    // чтобы исключить пустой ответ.
+    if (!emittedAnything && fullText.trim()) {
       yield { type: "text", content: fullText };
     }
 
