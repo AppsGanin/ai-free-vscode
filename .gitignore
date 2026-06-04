@@ -5,3 +5,4 @@ auth.json
 .copilot-specs-cache/
 .idea/
 .dist/
+dist/
