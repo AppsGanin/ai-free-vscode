@@ -1,10 +1,10 @@
-import * as vscode from "vscode";
 import { log } from "../../logger";
 import { supportsThinking } from "../common/ModelCapabilities";
 import {
   buildToolsSystemPrompt,
   createToolCallChunk,
   findToolCallMarkerStart,
+  looksLikeToolCallStart,
   parseToolCallsFromText,
   selectToolsForPrompt,
 } from "../common/ToolCalling";
@@ -20,6 +20,9 @@ const PROVIDER_ID = "ai-free-vscode";
 const MAX_PROMPT_CHARS = 500000;
 const MAX_SYSTEM_MESSAGE_CHARS = 100000;
 const MAX_TOOLCALL_HOLD_BUFFER_CHARS = 4096;
+// Жёсткий предел для подтверждённых tool_call (большие аргументы вроде целого
+// файла в replace_string_in_file): держим до этого размера, прежде чем сдаться.
+const MAX_TOOLCALL_HARD_CAP_CHARS = 262144;
 const MAX_TOOLMODE_NO_TOOLCALL_MS = 20000;
 const MAX_TOOLMODE_NO_TOOLCALL_CHARS = 12000;
 const MIN_TOOLMODE_GUARD_TEXT_CHARS = 64;
@@ -143,7 +146,7 @@ export class QwenApiClient {
       if (!chatId) {
         throw new ProviderError(
           PROVIDER_ID,
-          "Не удалось создать chat_id в Qwen API",
+          "Failed to create chat_id in Qwen API",
         );
       }
       log(`[qwen-api] created chat_id=${chatId}`);
@@ -163,6 +166,7 @@ export class QwenApiClient {
       messageContent,
       systemMessage,
       hasTools,
+      thinkingMode: params.thinkingMode,
     });
 
     if (params.parentId) {
@@ -287,7 +291,7 @@ export class QwenApiClient {
         if (!newChatId) {
           throw new ProviderError(
             PROVIDER_ID,
-            "Соединение прервано, не удалось создать новый чат для повторного запроса",
+            "Connection dropped; failed to create a new chat for retry",
           );
         }
         const retryBody: QwenRequestBody = {
@@ -310,7 +314,7 @@ export class QwenApiClient {
         if (!freshChatId) {
           throw new ProviderError(
             PROVIDER_ID,
-            "Qwen internal_error: не удалось создать новый чат для retry",
+            "Qwen internal_error: failed to create a new chat for retry",
           );
         }
 
@@ -414,7 +418,7 @@ export class QwenApiClient {
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       },
       body: JSON.stringify({
-        title: "Новый чат",
+        title: "New chat",
         models: [model],
         chat_mode: "normal",
         chat_type: "t2t",
@@ -630,12 +634,14 @@ export class QwenApiClient {
     messageContent: string | QwenContentPart[];
     systemMessage?: string;
     hasTools?: boolean;
+    thinkingMode?: "auto" | "on" | "off";
   }): QwenRequestBody {
     const userMsgId = crypto.randomUUID();
     const assistantMsgId = crypto.randomUUID();
     const thinkingConfig = this.resolveThinkingConfig(
       params.model,
       Boolean(params.hasTools),
+      params.thinkingMode,
     );
 
     const message = {
@@ -681,38 +687,25 @@ export class QwenApiClient {
   private resolveThinkingConfig(
     model: string,
     hasTools: boolean,
+    override?: "auto" | "on" | "off",
   ): {
     mode: "auto" | "on" | "off";
     enabled: boolean;
     budgetTokens: number;
   } {
-    const cfg = vscode.workspace.getConfiguration("freeAI.qwen");
-    const rawMode = String(cfg.get("thinkingMode", "auto")).toLowerCase();
-    const mode: "auto" | "on" | "off" =
-      rawMode === "on" || rawMode === "off" ? rawMode : "auto";
+    // Режим всегда "auto" (настройка убрана); override "off" приходит только от
+    // служебных запросов (коммиты/фиксы/inline-подсказки).
+    const mode: "auto" | "on" | "off" = override === "off" ? "off" : "auto";
 
-    const budgetRaw = Number(cfg.get("thinkingBudgetTokens", 4096));
-    const budgetTokens = Number.isFinite(budgetRaw)
-      ? Math.max(256, Math.floor(budgetRaw))
-      : 8192;
+    const budgetTokens = 4096;
 
     const thinkingSupported = supportsThinking(
       QWEN_MODELS,
       resolveModelId(model),
     );
-    const enabled = thinkingSupported
-      ? mode === "on"
-        ? true
-        : mode === "off"
-          ? false
-          : !hasTools
-      : false;
-
-    if (!thinkingSupported && mode === "on") {
-      log(
-        `[qwen-api] thinking disabled for model=${resolveModelId(model)} because the model does not support thinking`,
-      );
-    }
+    // При наличии tools thinking выключаем всегда: связка reasoning + инструменты
+    // на этом бэкенде ненадёжна. В обычном чате (без tools) — включён.
+    const enabled = thinkingSupported && !hasTools && mode !== "off";
 
     return { mode, enabled, budgetTokens };
   }
@@ -846,13 +839,18 @@ export class QwenApiClient {
             // Маркер уже найден — всё буферизуем
             toolCallHoldBuffer += contentText;
 
-            // Anti-stall: если буфер подозрительно большой, это почти наверняка
-            // ложное срабатывание маркера (например, обычный markdown/code block).
-            // В таком случае перестаём удерживать и отдаём текст сразу, чтобы
-            // не ждать завершения всего SSE потока.
-            if (toolCallHoldBuffer.length >= MAX_TOOLCALL_HOLD_BUFFER_CHARS) {
+            // Anti-stall: если буфер большой И не похож на настоящий tool_call,
+            // это ложное срабатывание (обычный markdown/code block) — сбрасываем
+            // как текст. Но крупные легитимные вызовы (например целый файл в
+            // аргументах) удерживаем вплоть до жёсткого предела.
+            const realToolCall = looksLikeToolCallStart(toolCallHoldBuffer);
+            const overSoftLimit =
+              toolCallHoldBuffer.length >= MAX_TOOLCALL_HOLD_BUFFER_CHARS;
+            const overHardCap =
+              toolCallHoldBuffer.length >= MAX_TOOLCALL_HARD_CAP_CHARS;
+            if ((overSoftLimit && !realToolCall) || overHardCap) {
               log(
-                `[qwen-api] hold buffer bailout length=${toolCallHoldBuffer.length}, flushing as text`,
+                `[qwen-api] hold buffer bailout length=${toolCallHoldBuffer.length} realToolCall=${realToolCall}, flushing as text`,
               );
               const sanitized =
                 stripDanglingToolCallMarkers(toolCallHoldBuffer);
@@ -1027,9 +1025,12 @@ export class QwenApiClient {
       log(`[qwen-api] line[${i}]: ${firstLines[i].slice(0, 200)}`);
     }
 
+    let emittedAnything = streamedTextChars > 0;
+
     if (allowToolCalls && nativeToolCalls.length > 0) {
       log(`[qwen-api] native toolCalls=${nativeToolCalls.length}`);
       yield* nativeToolCalls;
+      emittedAnything = true;
     } else if (allowToolCalls && toolCallHoldActive) {
       // Маркер был найден — парсим буферизованный текст
       log(
@@ -1041,23 +1042,32 @@ export class QwenApiClient {
           logPrefix: "[qwen-api] ",
         }),
       );
-      const hasToolCalls = parsedChunks.some((c) => c.type === "tool_call");
+      const toolChunks = parsedChunks.filter((c) => c.type === "tool_call");
 
-      if (hasToolCalls) {
-        for (const c of parsedChunks) {
-          if (c.type === "tool_call") {
-            yield c;
-          }
+      if (toolChunks.length > 0) {
+        for (const c of toolChunks) {
+          yield c;
         }
+        emittedAnything = true;
       } else {
-        // Ложное срабатывание (например, code block с ```) — отдаём текст
-        const sanitized = stripDanglingToolCallMarkers(toolCallHoldBuffer);
+        // Ложное срабатывание (например, code block с ```) — отдаём текст.
+        // Если очистка маркеров оставила пусто, используем исходный буфер,
+        // чтобы не получить пустой ответ в чате.
+        const sanitized =
+          stripDanglingToolCallMarkers(toolCallHoldBuffer) ||
+          toolCallHoldBuffer.trim();
         if (sanitized) {
           streamedTextChars += sanitized.length;
           yield { type: "text", content: sanitized };
+          emittedAnything = true;
         }
       }
-    } else if (streamedTextChars === 0 && fullText.trim()) {
+    }
+
+    // Гарантированный фолбэк: если пользователю не отдали ничего (ни текста,
+    // ни tool call), но модель что-то сгенерировала — отдаём накопленный текст,
+    // чтобы исключить пустой ответ.
+    if (!emittedAnything && fullText.trim()) {
       yield { type: "text", content: fullText };
     }
 

@@ -15,8 +15,14 @@
 - ✅ Integrates free Qwen and DeepSeek models into Copilot Chat
 - ✅ Requires no API keys and does not use paid OpenAI endpoints
 - ✅ Authenticates via a real browser session
-- ✅ Supports streaming, thinking mode, and tool calling
+- ✅ Supports streaming, automatic thinking mode, and tool calling
 - ✅ Exposes models through a unified provider for VS Code
+- ✅ Generates commit messages from your staged diff
+- ✅ Inline code suggestions (ghost text) on demand
+- ✅ "Fix with AI" Quick Fix on errors/warnings, with a diff preview
+
+Only models from providers you are signed into appear in the picker — no
+dead entries that fail on use.
 
 ## Supported models
 
@@ -83,14 +89,62 @@ To check auth status:
 
 - `AI Free VSCode — Status`
 
+## Editor features
+
+Besides Copilot Chat, the extension adds a few editor integrations powered by the
+same free models. All of them respect your sign-in state and use thinking off for
+speed.
+
+### Commit message generation
+
+A ✨ button in the **Source Control** view title bar generates a commit message
+from your staged diff (falls back to the working-tree diff). The message streams
+straight into the commit input box.
+
+- Model: `freeAI.commit.model` (`auto` = first available)
+- Prompt: `freeAI.commit.prompt` (Conventional Commits, English by default)
+- Pick a model quickly: command `AI Free VSCode — Select commit model`
+
+### Inline suggestions (ghost text)
+
+On-demand code completion at the cursor. It is **manual only** — it never fires
+while typing.
+
+- Trigger: `Ctrl+Alt+\` (Mac `Cmd+Alt+\`), or command
+  `AI Free VSCode — Inline suggestion`, or the built-in *Trigger Inline Suggestion*
+- Accept with `Tab`, dismiss with `Esc`
+- Enable first: set `freeAI.suggestions.enabled` to `true` (the hotkey will offer
+  to enable it)
+
+> These backends run through a web session (DeepSeek also solves a PoW challenge),
+> so expect noticeably higher latency than native Copilot.
+
+### Fix with AI (Quick Fix)
+
+When there is a red error or yellow warning, open the lightbulb (`Cmd+.` /
+`Ctrl+.`) and choose **✨ Fix with AI Free**. The model rewrites the affected
+lines (indentation is preserved) and shows a **diff preview** with Apply / Cancel
+before changing the file.
+
+- Toggle the action: `freeAI.fix.enabled`
+- Model: `freeAI.fix.model`
+
 ## Configuration
 
-| Setting                            | Default  | Description                                 |
-| ---------------------------------- | -------- | ------------------------------------------- |
-| `freeAI.playwright.timeout`        | `120000` | Browser sign-in timeout in milliseconds     |
-| `freeAI.qwen.thinkingMode`         | `auto`   | Qwen thinking mode: `auto`, `on`, `off`     |
-| `freeAI.qwen.thinkingBudgetTokens` | `4096`   | Token budget for Qwen thinking              |
-| `freeAI.deepseek.thinkingMode`     | `auto`   | DeepSeek thinking mode: `auto`, `on`, `off` |
+| Setting                          | Default  | Description                                                  |
+| -------------------------------- | -------- | ------------------------------------------------------------ |
+| `freeAI.playwright.timeout`      | `120000` | Browser sign-in timeout in milliseconds                     |
+| `freeAI.commit.model`            | `auto`   | Model for commit messages (`auto` = first available)        |
+| `freeAI.commit.prompt`           | —        | Instruction prepended to the diff for commit generation     |
+| `freeAI.suggestions.enabled`     | `false`  | Enable manual inline ghost-text suggestions                 |
+| `freeAI.suggestions.model`       | `auto`   | Model for inline suggestions                                 |
+| `freeAI.suggestions.maxPrefixChars` | `2000` | Chars of code before the cursor sent to the model           |
+| `freeAI.suggestions.maxSuffixChars` | `800`  | Chars of code after the cursor sent to the model            |
+| `freeAI.fix.enabled`             | `true`   | Show the "Fix with AI Free" Quick Fix on diagnostics        |
+| `freeAI.fix.model`               | `auto`   | Model for fixing problems                                    |
+
+Thinking (reasoning) is automatic: enabled in plain chat, disabled when tools are
+active (reasoning is unreliable with tool calling on these backends).
 
 ## Development
 
@@ -116,6 +170,9 @@ Run the extension in VS Code with `F5`.
 - `src/providers/deepseek/` — DeepSeek client, auth manager, and model definitions
 - `src/vscode/ProviderRegistry.ts` — registers the provider with VS Code LM API
 - `src/vscode/VSCodeLMAdapter.ts` — adapter between VS Code LM API and providers
+- `src/vscode/CommitMessageGenerator.ts` — commit message generation command
+- `src/vscode/InlineCompletionProvider.ts` — manual inline ghost-text suggestions
+- `src/vscode/FixProblemProvider.ts` — "Fix with AI" Quick Fix with diff preview
 - `esbuild.js` — bundles source into `dist/extension.js`
 - `package.json` — extension metadata, commands, and dependencies
 - `tsconfig.json` — TypeScript configuration

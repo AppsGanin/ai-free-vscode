@@ -58,7 +58,97 @@ export function findToolCallMarkerStart(
     }
   }
 
+  // Дополнительно распознаём начало "сырого" JSON tool call вида
+  // {"name": "...", "arguments": {...}}. Модели часто выводят его без обёртки
+  // ```tool_call / <tool_call>, и без этой проверки он утекал бы в чат как
+  // обычный текст вместо структурного вызова инструмента.
+  const jsonStart = findJsonToolCallStart(text);
+  if (jsonStart !== -1 && (earliest === -1 || jsonStart < earliest)) {
+    earliest = jsonStart;
+  }
+
   return earliest;
+}
+
+// Полное вхождение начала JSON tool-call объекта (с учётом пробелов): {"name":
+const JSON_TOOLCALL_START_RE = /\{\s*"name"\s*:/;
+// Компактная форма для распознавания частичного префикса в конце чанка.
+const JSON_TOOLCALL_PARTIAL = '{"name"';
+// Минимальная длина частичного префикса JSON tool call ({"nam...), чтобы не
+// реагировать на любой одиночный символ "{" в обычном тексте/коде.
+const MIN_PARTIAL_JSON_TOOLCALL_LEN = 5;
+
+/**
+ * Возвращает индекс начала JSON tool-call объекта ({"name": ...) в тексте,
+ * включая частичный префикс в конце строки (объект мог быть разбит по SSE
+ * чанкам), либо -1.
+ */
+function findJsonToolCallStart(text: string): number {
+  const full = JSON_TOOLCALL_START_RE.exec(text);
+  let earliest = full ? full.index : -1;
+
+  for (
+    let len = Math.min(JSON_TOOLCALL_PARTIAL.length - 1, text.length);
+    len >= MIN_PARTIAL_JSON_TOOLCALL_LEN;
+    len--
+  ) {
+    if (text.endsWith(JSON_TOOLCALL_PARTIAL.slice(0, len))) {
+      const start = text.length - len;
+      if (earliest === -1 || start < earliest) {
+        earliest = start;
+      }
+      break;
+    }
+  }
+
+  return earliest;
+}
+
+/**
+ * Похоже ли накопленное на настоящий tool_call (а не ложное срабатывание
+ * маркера вроде markdown code-block). Используется, чтобы не «сбрасывать»
+ * большие легитимные вызовы (например replace_string_in_file с целым файлом)
+ * как обычный текст при достижении лимита hold-буфера.
+ */
+export function looksLikeToolCallStart(text: string): boolean {
+  return (
+    /```tool_call/i.test(text) ||
+    /<tool_call>/i.test(text) ||
+    /"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:/.test(text) ||
+    /"arguments"\s*:\s*\{/.test(text)
+  );
+}
+
+/**
+ * Удаляет из текста сбалансированные JSON-объекты tool-call формата
+ * ({"name":..., "arguments":{...}}), корректно учитывая вложенные скобки и
+ * строки. Regex-замены с `\{[\s\S]*?\}` ломались на вложенных `}` внутри
+ * строковых значений (большие oldString/newString) и оставляли JSON в чате.
+ */
+export function stripInlineToolCallJson(text: string): string {
+  let result = "";
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === "{") {
+      const extracted = extractBalancedJsonAt(text, i);
+      if (extracted) {
+        const parsed = tryParseJson(extracted.json);
+        const isToolCall =
+          !!parsed &&
+          typeof parsed.name === "string" &&
+          (parsed.arguments !== undefined ||
+            parsed.params !== undefined ||
+            parsed.input !== undefined);
+        if (isToolCall) {
+          i = extracted.end;
+          continue;
+        }
+      }
+    }
+    result += text[i];
+    i++;
+  }
+  return result;
 }
 
 /**
@@ -408,7 +498,11 @@ function parseLooseJsonToolCallsFromText(text: string): {
     const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
     if (!name) continue;
 
-    const argsRaw = parsed.arguments ?? parsed.params ?? parsed.input ?? {};
+    // Требуем явное поле аргументов: произвольный JSON с полем "name", но без
+    // arguments/params/input — это данные, а не вызов инструмента.
+    const argsRaw = parsed.arguments ?? parsed.params ?? parsed.input;
+    if (argsRaw === undefined) continue;
+
     calls.push(
       createToolCallChunk({
         name,

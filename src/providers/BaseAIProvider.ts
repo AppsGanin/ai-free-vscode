@@ -28,6 +28,17 @@ export abstract class BaseAIProvider implements vscode.Disposable {
   abstract getModels(): AIModelInfo[];
 
   /**
+   * Возвращает модели, которые реально доступны с учётом авторизации.
+   * По умолчанию: все модели, если провайдер авторизован, иначе пустой список.
+   * Композитные провайдеры переопределяют, чтобы фильтровать по под-провайдерам.
+   */
+  async getAvailableModels(
+    secrets: vscode.SecretStorage,
+  ): Promise<AIModelInfo[]> {
+    return (await this.isAuthenticated(secrets)) ? this.getModels() : [];
+  }
+
+  /**
    * Проверяет, авторизован ли пользователь.
    * Должна быть быстрой (не делать сетевых запросов — только SecretStorage).
    */

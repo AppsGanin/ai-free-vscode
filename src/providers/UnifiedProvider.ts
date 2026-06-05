@@ -31,10 +31,31 @@ export class UnifiedProvider extends BaseAIProvider {
   }
 
   getModels(): AIModelInfo[] {
+    return this.collectModels(this.providers);
+  }
+
+  /**
+   * Только модели тех под-провайдеров, в которые пользователь реально вошёл.
+   * Без этого в model picker (и в "auto" для коммитов) попадали модели
+   * неавторизованных провайдеров, и запрос к ним падал с ошибкой авторизации.
+   */
+  override async getAvailableModels(
+    secrets: vscode.SecretStorage,
+  ): Promise<AIModelInfo[]> {
+    const authed: BaseAIProvider[] = [];
+    for (const provider of this.providers) {
+      if (await provider.isAuthenticated(secrets)) {
+        authed.push(provider);
+      }
+    }
+    return this.collectModels(authed);
+  }
+
+  private collectModels(providers: BaseAIProvider[]): AIModelInfo[] {
     const seen = new Set<string>();
     const all: AIModelInfo[] = [];
 
-    for (const provider of this.providers) {
+    for (const provider of providers) {
       const providerTag = this.getProviderTag(provider);
 
       for (const model of provider.getModels()) {
@@ -81,8 +102,8 @@ export class UnifiedProvider extends BaseAIProvider {
   async login(secrets: vscode.SecretStorage): Promise<void> {
     const picks = [
       {
-        label: "Все провайдеры",
-        description: "Запустить авторизацию для всех",
+        label: "All providers",
+        description: "Sign in to all",
         value: "all" as const,
       },
       ...this.providers.map((provider) => ({
@@ -93,8 +114,8 @@ export class UnifiedProvider extends BaseAIProvider {
     ];
 
     const selected = await vscode.window.showQuickPick(picks, {
-      title: "Выберите провайдер для входа",
-      placeHolder: "Авторизация",
+      title: "Select a provider to sign in",
+      placeHolder: "Sign In",
       ignoreFocusOut: true,
     });
 
@@ -122,8 +143,8 @@ export class UnifiedProvider extends BaseAIProvider {
   async logout(secrets: vscode.SecretStorage): Promise<void> {
     const picks = [
       {
-        label: "Все провайдеры",
-        description: "Выйти из всех",
+        label: "All providers",
+        description: "Sign out of all",
         value: "all" as const,
       },
       ...this.providers.map((provider) => ({
@@ -134,8 +155,8 @@ export class UnifiedProvider extends BaseAIProvider {
     ];
 
     const selected = await vscode.window.showQuickPick(picks, {
-      title: "Выберите провайдер для выхода",
-      placeHolder: "Выход",
+      title: "Select a provider to sign out",
+      placeHolder: "Sign Out",
       ignoreFocusOut: true,
     });
 

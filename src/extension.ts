@@ -4,6 +4,9 @@ import { UnifiedProvider } from "./providers/UnifiedProvider";
 import { DeepSeekProvider } from "./providers/deepseek/DeepSeekProvider";
 import { QwenProvider } from "./providers/qwen/QwenProvider";
 import { AuthExpiredError, RateLimitError } from "./providers/types";
+import { registerCommitMessageCommands } from "./vscode/CommitMessageGenerator";
+import { registerFixProblem } from "./vscode/FixProblemProvider";
+import { registerInlineCompletions } from "./vscode/InlineCompletionProvider";
 import { ProviderRegistry } from "./vscode/ProviderRegistry";
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -45,7 +48,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
-            title: `${provider.displayName}: открываем браузер для авторизации...`,
+            title: `${provider.displayName}: opening browser for sign-in...`,
             cancellable: false,
           },
           async () => {
@@ -54,7 +57,7 @@ export function activate(context: vscode.ExtensionContext): void {
               await provider.login(context.secrets);
               log(`[${id}] login success`);
               vscode.window.showInformationMessage(
-                `${provider.displayName}: авторизация прошла успешно!`,
+                `${provider.displayName}: signed in successfully!`,
               );
             } catch (err) {
               const message = err instanceof Error ? err.message : String(err);
@@ -63,7 +66,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 log(err.stack);
               }
               vscode.window.showErrorMessage(
-                `${provider.displayName}: ошибка авторизации — ${message}`,
+                `${provider.displayName}: sign-in error — ${message}`,
               );
             }
           },
@@ -75,15 +78,15 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
       vscode.commands.registerCommand(`${id}.logout`, async () => {
         const confirm = await vscode.window.showWarningMessage(
-          `Выйти из ${provider.displayName}? Модели станут недоступны.`,
+          `Sign out of ${provider.displayName}? Its models will become unavailable.`,
           { modal: true },
-          "Выйти",
+          "Sign Out",
         );
-        if (confirm === "Выйти") {
+        if (confirm === "Sign Out") {
           await provider.logout(context.secrets);
           log(`[${id}] logged out`);
           vscode.window.showInformationMessage(
-            `${provider.displayName}: вы вышли из аккаунта.`,
+            `${provider.displayName}: signed out.`,
           );
         }
       }),
@@ -95,14 +98,14 @@ export function activate(context: vscode.ExtensionContext): void {
         const isAuth = await provider.isAuthenticated(context.secrets);
         if (isAuth) {
           vscode.window.showInformationMessage(
-            `${provider.displayName}: авторизован ✓. Модели доступны в Copilot Chat.`,
+            `${provider.displayName}: signed in ✓. Models available in Copilot Chat.`,
           );
         } else {
           const action = await vscode.window.showWarningMessage(
-            `${provider.displayName}: не авторизован. Войдите, чтобы использовать модели.`,
-            "Войти",
+            `${provider.displayName}: not signed in. Sign in to use the models.`,
+            "Sign In",
           );
-          if (action === "Войти") {
+          if (action === "Sign In") {
             await vscode.commands.executeCommand(`${id}.login`);
           }
         }
@@ -116,6 +119,15 @@ export function activate(context: vscode.ExtensionContext): void {
       }),
     );
   }
+
+  // ─── Кнопка генерации сообщения коммита (как у Copilot) ──────────────────
+  registerCommitMessageCommands(context);
+
+  // ─── Inline-подсказки (ghost text) ───────────────────────────────────────
+  registerInlineCompletions(context);
+
+  // ─── Исправление проблем (красное/жёлтое) через Quick Fix ────────────────
+  registerFixProblem(context);
 
   // ─── Инициализация: проверяем начальное состояние авторизации ─────────────
   void initAuthStates(registry, context.secrets);
@@ -140,11 +152,11 @@ async function initAuthStates(
     if (!isAuth) {
       // Показываем ненавязчивое уведомление при первом запуске
       const action = await vscode.window.showInformationMessage(
-        `${provider.displayName}: нажмите "Войти", чтобы использовать модели в Copilot Chat.`,
-        "Войти",
-        "Позже",
+        `${provider.displayName}: click "Sign In" to use the models in Copilot Chat.`,
+        "Sign In",
+        "Later",
       );
-      if (action === "Войти") {
+      if (action === "Sign In") {
         await vscode.commands.executeCommand(`${id}.login`);
       }
     }
@@ -153,7 +165,7 @@ async function initAuthStates(
 
 /**
  * Глобальный обработчик ошибок провайдера для использования в других местах.
- * Показывает уведомление с кнопкой "Войти" при AuthExpiredError.
+ * Показывает уведомление с кнопкой "Sign In" при AuthExpiredError.
  */
 export async function handleProviderError(
   err: unknown,
@@ -161,10 +173,10 @@ export async function handleProviderError(
 ): Promise<void> {
   if (err instanceof AuthExpiredError) {
     const action = await vscode.window.showWarningMessage(
-      `Сессия истекла. Войдите снова в ${providerId}.`,
-      "Войти",
+      `Session expired. Sign in to ${providerId} again.`,
+      "Sign In",
     );
-    if (action === "Войти") {
+    if (action === "Sign In") {
       await vscode.commands.executeCommand(`${providerId}.login`);
     }
   } else if (err instanceof RateLimitError) {
@@ -172,10 +184,10 @@ export async function handleProviderError(
       ? Math.ceil(err.retryAfterMs / 60000)
       : undefined;
     const msg = retryMin
-      ? `Превышен лимит запросов. Попробуйте через ${retryMin} мин.`
-      : "Превышен лимит запросов. Попробуйте позже.";
+      ? `Rate limit exceeded. Try again in ${retryMin} min.`
+      : "Rate limit exceeded. Try again later.";
     vscode.window.showWarningMessage(msg);
   } else if (err instanceof Error) {
-    vscode.window.showErrorMessage(`Ошибка ${providerId}: ${err.message}`);
+    vscode.window.showErrorMessage(`${providerId} error: ${err.message}`);
   }
 }

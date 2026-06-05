@@ -1,6 +1,11 @@
 import * as vscode from "vscode";
 import { log } from "../logger";
 import type { BaseAIProvider } from "../providers/BaseAIProvider";
+import {
+  looksLikeToolCallStart,
+  parseToolCallsFromText,
+  stripInlineToolCallJson,
+} from "../providers/common/ToolCalling";
 import { vsCodeMessageToAI } from "../providers/types";
 
 // Небольшая буферизация стрима для более плавного отображения в чате
@@ -8,6 +13,64 @@ import { vsCodeMessageToAI } from "../providers/types";
 const STREAM_BUFFER_CHARS = 360;
 const UI_EMIT_CHUNK_CHARS = 80;
 const UI_EMIT_DELAY_MS = 12;
+// Накладные расходы на структуру одного сообщения (роль/разделители) в токенах.
+const PER_MESSAGE_TOKEN_OVERHEAD = 4;
+
+/**
+ * Грубая, но более честная, чем chars/4, оценка числа токенов.
+ *
+ * BPE-токенайзеры Qwen/DeepSeek дают для латиницы ~4 символа на токен, а для
+ * кириллицы/CJK — гораздо меньше (часто ~1.5 символа на токен). Простое
+ * `length / 4` сильно занижало контекст для не-латинского текста.
+ */
+function estimateTokens(text: string): number {
+  if (!text) return 0;
+  let ascii = 0;
+  let other = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) < 128) {
+      ascii++;
+    } else {
+      other++;
+    }
+  }
+  return Math.ceil(ascii / 4 + other / 1.5);
+}
+
+/**
+ * Извлекает текст из части сообщения VS Code для оценки токенов.
+ * Учитывает text-части, а также tool call/result (их содержимое тоже идёт в
+ * контекст), чтобы не занижать счётчик.
+ */
+function partToCountableText(part: unknown): string {
+  if (typeof part === "string") return part;
+  if (!part || typeof part !== "object") return "";
+  const p = part as Record<string, unknown>;
+  if (typeof p.value === "string") return p.value; // LanguageModelTextPart
+  if (typeof p.name === "string" && "input" in p) {
+    // LanguageModelToolCallPart
+    return `${p.name} ${safeStringify(p.input)}`;
+  }
+  if ("content" in p) {
+    // LanguageModelToolResultPart
+    const content = p.content;
+    if (Array.isArray(content)) {
+      return content.map(partToCountableText).join(" ");
+    }
+    return safeStringify(content);
+  }
+  return "";
+}
+
+function safeStringify(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return "";
+  }
+}
+
 /**
  * Адаптер: оборачивает BaseAIProvider в vscode.LanguageModelChatProvider.
  * Один экземпляр на каждый зарегистрированный провайдер.
@@ -35,14 +98,18 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
     _options: vscode.PrepareLanguageModelChatModelOptions,
     _token: vscode.CancellationToken,
   ): Promise<vscode.LanguageModelChatInformation[]> {
-    const isAuth = await this.provider.isAuthenticated(this.secrets);
-    if (!isAuth) {
+    // Берём только модели авторизованных (под-)провайдеров: иначе в picker'е
+    // появляются модели, в которые пользователь не вошёл, и запрос падает.
+    const availableModels = await this.provider.getAvailableModels(
+      this.secrets,
+    );
+    if (availableModels.length === 0) {
       // Возвращаем пустой список пока не авторизован,
       // после логина onDidAuthChange обновит список
       return [];
     }
 
-    return this.provider.getModels().map((model) => ({
+    return availableModels.map((model) => ({
       id: model.id,
       name: model.name,
       family: model.family,
@@ -94,6 +161,16 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
     const protectFromRawToolProtocol =
       mappedToolMode !== "none" && toolCount > 0;
 
+    // Вызывающая сторона может принудительно задать режим thinking через
+    // modelOptions (например коммиты/inline-подсказки отключают reasoning).
+    const rawThinking = (
+      options.modelOptions as { thinkingMode?: unknown } | undefined
+    )?.thinkingMode;
+    const thinkingMode: "auto" | "on" | "off" | undefined =
+      rawThinking === "on" || rawThinking === "off" || rawThinking === "auto"
+        ? rawThinking
+        : undefined;
+
     log(
       `[${this.provider.id}] chat request model=${model.id} messages=${messages.length} user=${userCount} assistant=${assistantCount} system=${systemCount} tools=${toolCount} toolMode=${mappedToolMode}`,
     );
@@ -104,6 +181,7 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
         messages: aiMessages,
         tools: tools?.length ? tools : undefined,
         toolMode: mappedToolMode,
+        thinkingMode,
         abortSignal: abortController.signal,
       },
       this.secrets,
@@ -119,6 +197,13 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
 
     let textBuffer = "";
     let thinkingBuffer = "";
+    // Полный сырой text-поток (до санитайза) — для восстановления tool_call,
+    // если он утёк в текстовый канал (например очень большой вызов, который не
+    // удержал holdback провайдера).
+    let rawTextAll = "";
+    // Полный thinking-поток — для восстановления tool_call, если модель увела
+    // его в reasoning-канал вместо канала ответа (thinking + tools).
+    let thinkingAll = "";
 
     const ThinkingPartCtor = (
       vscode as unknown as {
@@ -193,6 +278,7 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
         }
 
         if (chunk.type === "text") {
+          rawTextAll += chunk.content;
           const safeText = this.sanitizeRawToolProtocolText(
             chunk.content,
             protectFromRawToolProtocol,
@@ -211,6 +297,7 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
           thinkingChunks++;
           generatedChars += chunk.content.length;
           thinkingBuffer += chunk.content;
+          thinkingAll += chunk.content;
           if (shouldFlushBuffer(thinkingBuffer)) {
             await flushThinkingBuffer();
           }
@@ -296,6 +383,43 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
       log(
         `[${this.provider.id}] flushed pending tool calls, totalEmitted=${emittedToolCalls}`,
       );
+    }
+
+    // Восстановление tool_call, если он не пришёл структурно, но «утёк» в
+    // текстовый или thinking-канал (большой вызов мимо holdback провайдера, или
+    // reasoning при thinking+tools). Достаём из накопленных буферов.
+    if (protectFromRawToolProtocol && emittedToolCalls === 0) {
+      for (const [source, buffer] of [
+        ["text", rawTextAll],
+        ["thinking", thinkingAll],
+      ] as const) {
+        if (!looksLikeToolCallStart(buffer)) {
+          continue;
+        }
+        let recovered = 0;
+        for (const tc of parseToolCallsFromText(buffer)) {
+          if (tc.type !== "tool_call") {
+            continue;
+          }
+          const args = this.tryParseJsonObject(tc.argumentsPart) ?? {};
+          const normalizedArgs = this.normalizeToolArguments(tc.name, args);
+          progress.report(
+            new vscode.LanguageModelToolCallPart(
+              tc.callId,
+              tc.name,
+              normalizedArgs,
+            ),
+          );
+          emittedToolCalls++;
+          recovered++;
+        }
+        if (recovered > 0) {
+          log(
+            `[${this.provider.id}] recovered ${recovered} tool_call(s) from ${source} channel`,
+          );
+          break;
+        }
+      }
     }
 
     // Фолбэк usage: если провайдер не прислал фактические токены,
@@ -403,14 +527,9 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
 
     sanitized = sanitized.replace(/```tool_call[\s\S]*?```/gi, "\n\n");
     sanitized = sanitized.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "\n\n");
-    sanitized = sanitized.replace(
-      /\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[\s\S]*?\}\s*\}/g,
-      " ",
-    );
-    sanitized = sanitized.replace(
-      /^\s*\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{.*\}\s*\}\s*$/gim,
-      "\n",
-    );
+    // Сбалансированное удаление inline JSON tool-call (учитывает вложенные `}`
+    // в больших строковых аргументах — regex это не вытягивал).
+    sanitized = stripInlineToolCallJson(sanitized);
 
     sanitized = sanitized.replace(/^\s*tool_call\s*$/gim, "\n");
     sanitized = sanitized.replace(
@@ -438,7 +557,9 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
     // markdown code fences с содержимым.
     sanitized = sanitized.replace(/```[a-zA-Z0-9_-]*\s*\n\s*```/g, "\n");
 
-    sanitized = sanitized.replace(/[ \t]{2,}/g, " ");
+    // ВНИМАНИЕ: не схлопываем горизонтальные пробелы (` `/`\t`). Санитайзер
+    // вызывается на каждом частичном чанке стрима, и `/[ \t]{2,}/ → " "` съедал
+    // отступы кода и выровненный текст — это выглядело как "пропавшие символы".
     sanitized = sanitized.replace(/\n{3,}/g, "\n\n");
 
     return sanitized;
@@ -449,20 +570,12 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
     text: string | vscode.LanguageModelChatMessage,
     _token: vscode.CancellationToken,
   ): Promise<number> {
-    // Простая оценка: ~4 символа на токен
-    const str =
-      typeof text === "string"
-        ? text
-        : text.content
-            .map((p) =>
-              typeof p === "string"
-                ? p
-                : "value" in p
-                  ? String((p as { value: unknown }).value)
-                  : "",
-            )
-            .join("");
-    return Math.ceil(str.length / 4);
+    if (typeof text === "string") {
+      return estimateTokens(text);
+    }
+
+    const str = text.content.map(partToCountableText).join("\n");
+    return estimateTokens(str) + PER_MESSAGE_TOKEN_OVERHEAD;
   }
 
   dispose(): void {

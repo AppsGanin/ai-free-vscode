@@ -35,57 +35,109 @@
     "commands": [
       {
         "command": "ai-free-vscode.login",
-        "title": "AI Free VSCode — Войти (Sign In)"
+        "title": "AI Free VSCode — Sign In"
       },
       {
         "command": "ai-free-vscode.logout",
-        "title": "AI Free VSCode — Выйти (Sign Out)"
+        "title": "AI Free VSCode — Sign Out"
       },
       {
         "command": "ai-free-vscode.status",
-        "title": "AI Free VSCode — Статус авторизации"
+        "title": "AI Free VSCode — Status"
       },
       {
         "command": "ai-free-vscode.manage",
-        "title": "AI Free VSCode — Управление аккаунтом"
+        "title": "AI Free VSCode — Manage Account"
+      },
+      {
+        "command": "ai-free-vscode.generateCommitMessage",
+        "title": "AI Free VSCode — Generate Commit Message",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "ai-free-vscode.selectCommitModel",
+        "title": "AI Free VSCode — Select Commit Model"
+      },
+      {
+        "command": "ai-free-vscode.triggerInlineSuggestion",
+        "title": "AI Free VSCode — Inline Suggestion (Ghost Text)"
+      },
+      {
+        "command": "ai-free-vscode.fixProblem",
+        "title": "AI Free VSCode — Fix Problem (Error/Warning)",
+        "icon": "$(sparkle)"
       }
     ],
+    "menus": {
+      "scm/title": [
+        {
+          "command": "ai-free-vscode.generateCommitMessage",
+          "when": "scmProvider == git",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "AI Free VSCode",
       "properties": {
         "freeAI.playwright.timeout": {
           "type": "number",
           "default": 120000,
-          "description": "Таймаут ожидания авторизации в браузере (мс)"
+          "description": "Browser sign-in timeout in milliseconds"
         },
-        "freeAI.qwen.thinkingMode": {
+        "freeAI.commit.model": {
           "type": "string",
-          "enum": [
-            "auto",
-            "on",
-            "off"
-          ],
           "default": "auto",
-          "description": "Режим thinking для Qwen: auto = выключать при tools, on = всегда включать, off = всегда выключать"
+          "markdownDescription": "Model for commit message generation. `auto` = first available. You can set a model id (e.g. `deepseek-default`) or pick one via the **AI Free VSCode — Select Commit Model** command."
         },
-        "freeAI.qwen.thinkingBudgetTokens": {
+        "freeAI.commit.prompt": {
+          "type": "string",
+          "editPresentation": "multilineText",
+          "default": "Generate a commit message for the git diff below.\nRequirements:\n- Use Conventional Commits format: type(scope): summary (type = feat|fix|docs|style|refactor|perf|test|build|ci|chore).\n- Subject on a single line, imperative mood, max 72 characters.\n- Write the message in English.\n- For significant changes, add a short body after a blank line (a bullet list is allowed).\n- Reply with ONLY the commit message text: no markdown fences, no quotes, no explanations.",
+          "markdownDescription": "Instruction (prompt) for commit message generation. The git diff is appended to it automatically."
+        },
+        "freeAI.suggestions.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable manual inline suggestions (ghost text) from the free models. Trigger via the 'AI Free VSCode — Inline Suggestion' command or the Ctrl/Cmd+Alt+\\ hotkey. Note: latency is higher than Copilot (web session + PoW)."
+        },
+        "freeAI.suggestions.model": {
+          "type": "string",
+          "default": "auto",
+          "markdownDescription": "Model for inline suggestions. `auto` = first available. You can set a model id/family/name."
+        },
+        "freeAI.suggestions.maxPrefixChars": {
           "type": "number",
-          "default": 4096,
-          "minimum": 256,
-          "description": "Лимит токенов для thinking (используется когда thinking включен)"
+          "default": 2000,
+          "minimum": 200,
+          "description": "How many characters of code BEFORE the cursor to send to the model."
         },
-        "freeAI.deepseek.thinkingMode": {
+        "freeAI.suggestions.maxSuffixChars": {
+          "type": "number",
+          "default": 800,
+          "minimum": 0,
+          "description": "How many characters of code AFTER the cursor to send to the model."
+        },
+        "freeAI.fix.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the 'Fix with AI Free' action in the Quick Fix lightbulb (⌘./Ctrl+.) on errors and warnings."
+        },
+        "freeAI.fix.model": {
           "type": "string",
-          "enum": [
-            "auto",
-            "on",
-            "off"
-          ],
           "default": "auto",
-          "description": "Режим thinking для DeepSeek: auto = выключать при tools, on = всегда включать, off = всегда выключать"
+          "markdownDescription": "Model for fixing problems. `auto` = first available. You can set a model id/family/name."
         }
       }
-    }
+    },
+    "keybindings": [
+      {
+        "command": "ai-free-vscode.triggerInlineSuggestion",
+        "key": "ctrl+alt+\\",
+        "mac": "cmd+alt+\\",
+        "when": "editorTextFocus && !editorReadonly"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run bundle",

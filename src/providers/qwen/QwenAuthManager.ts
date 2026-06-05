@@ -65,7 +65,7 @@ export class QwenAuthManager {
 
       if (!token) {
         throw new Error(
-          "Не удалось извлечь токен авторизации после входа. Попробуйте ещё раз.",
+          "Failed to extract the auth token after sign-in. Try again.",
         );
       }
 
