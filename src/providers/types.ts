@@ -61,6 +61,12 @@ export interface AIRequestParams {
   tools?: AIToolDefinition[];
   /** Режим вызова tools */
   toolMode?: "auto" | "required" | "none";
+  /**
+   * Принудительный режим thinking. Переопределяет настройку провайдера.
+   * Используется для служебных запросов (коммиты, inline-подсказки), где
+   * reasoning не нужен и только добавляет задержку.
+   */
+  thinkingMode?: "auto" | "on" | "off";
   /** AbortSignal для отмены запроса */
   abortSignal?: AbortSignal;
 }

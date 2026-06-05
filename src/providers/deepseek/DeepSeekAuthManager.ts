@@ -64,7 +64,7 @@ export class DeepSeekAuthManager {
 
       if (!cookieHeader.includes("ds_session_id=")) {
         throw new Error(
-          "Не удалось получить cookies DeepSeek (ds_session_id). Войдите в аккаунт и повторите.",
+          "Failed to get DeepSeek cookies (ds_session_id). Sign in and try again.",
         );
       }
 
@@ -192,7 +192,7 @@ export class DeepSeekAuthManager {
         cleanup();
         reject(
           new Error(
-            `Таймаут авторизации DeepSeek (${Math.round(timeoutMs / 1000)}с). Выполните вход в открывшемся окне и попробуйте снова.`,
+            `DeepSeek sign-in timeout (${Math.round(timeoutMs / 1000)}s). Complete sign-in in the opened window and try again.`,
           ),
         );
       }, timeoutMs);

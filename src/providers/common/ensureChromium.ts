@@ -24,7 +24,7 @@ export async function ensureChromium(): Promise<void> {
   await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
-      title: "AI Free VSCode: Устанавливаю Chromium (первый запуск)…",
+      title: "AI Free VSCode: Installing Chromium (first run)…",
       cancellable: false,
     },
     () =>
@@ -49,7 +49,7 @@ export async function ensureChromium(): Promise<void> {
           } else {
             reject(
               new Error(
-                `playwright install chromium завершился с кодом ${code}`,
+                `playwright install chromium exited with code ${code}`,
               ),
             );
           }

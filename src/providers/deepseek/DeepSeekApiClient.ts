@@ -1,11 +1,12 @@
-import * as vscode from "vscode";
 import { log } from "../../logger";
 import { supportsThinking } from "../common/ModelCapabilities";
 import {
   buildToolsSystemPrompt,
   findToolCallMarkerStart,
+  looksLikeToolCallStart,
   parseToolCallsFromText,
   selectToolsForPrompt,
+  stripInlineToolCallJson,
 } from "../common/ToolCalling";
 import type { AIMessage, AIRequestParams, AIStreamChunk } from "../types";
 import { AuthExpiredError, ProviderError, RateLimitError } from "../types";
@@ -31,6 +32,9 @@ const TOOL_MARKER_HOLDBACK_CHARS = 11;
 // маркера (обычный markdown/код), а не tool call. Сбрасываем как текст, чтобы
 // не ждать конца SSE-потока.
 const MAX_TOOLCALL_HOLD_BUFFER_CHARS = 4096;
+// Жёсткий предел для подтверждённых tool_call (большие аргументы вроде целого
+// файла в replace_string_in_file): держим до этого размера, прежде чем сдаться.
+const MAX_TOOLCALL_HARD_CAP_CHARS = 262144;
 
 export interface DeepSeekAuthState {
   token?: string;
@@ -85,17 +89,9 @@ function sanitizeProtocolTranscript(text: string): string {
   sanitized = sanitized.replace(/```tool_call[\s\S]*?```/gi, "\n\n");
   // Убираем XML-подобный формат.
   sanitized = sanitized.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "\n\n");
-  // Убираем JSON-объекты tool-call формата (name + arguments), сохраняя пробел.
-  sanitized = sanitized.replace(
-    /\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[\s\S]*?\}\s*\}/g,
-    " ",
-  );
-  // Фолбэк: когда JSON tool_call приходит одной строкой и содержит фигурные скобки
-  // внутри строковых значений (старый regex может не покрыть все случаи).
-  sanitized = sanitized.replace(
-    /^\s*\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{.*\}\s*\}\s*$/gim,
-    "\n",
-  );
+  // Сбалансированное удаление inline JSON tool-call (учитывает вложенные `}`
+  // в больших строковых аргументах).
+  sanitized = stripInlineToolCallJson(sanitized);
 
   // Убираем явные служебные строки, не трогая прочий текст.
   sanitized = sanitized.replace(
@@ -168,7 +164,7 @@ export class DeepSeekApiClient {
     if (!sessionId) {
       throw new ProviderError(
         PROVIDER_ID,
-        `Не удалось получить id сессии DeepSeek: ${JSON.stringify(json).slice(0, 250)}`,
+        `Failed to get DeepSeek session id: ${JSON.stringify(json).slice(0, 250)}`,
       );
     }
 
@@ -184,7 +180,7 @@ export class DeepSeekApiClient {
     if (!sessionId) {
       throw new ProviderError(
         PROVIDER_ID,
-        "Отсутствует session_id для запроса",
+        "Missing session_id for the request",
       );
     }
 
@@ -210,6 +206,7 @@ export class DeepSeekApiClient {
     const thinkingConfig = this.resolveThinkingConfig(
       resolvedModelId,
       hasTools,
+      params.thinkingMode,
     );
     log(
       `[deepseek-api] thinking mode=${thinkingConfig.mode} enabled=${thinkingConfig.enabled} hasTools=${hasTools} model=${resolvedModelId}`,
@@ -273,6 +270,21 @@ export class DeepSeekApiClient {
     let pendingBuffer = "";
     let toolCallHoldBuffer = "";
     let toolCallHoldActive = false;
+    // DeepSeek-патчи для одного и того же пути приходят сокращённо: первый раз
+    // {"p":"response/content","o":"APPEND","v":"H"}, далее просто {"v":"e"}.
+    // Чтобы такие "хвостовые" патчи (в т.ч. внутри BATCH) не терялись и не
+    // утекали в text вместо thinking, держим активную цель между событиями.
+    // fragmentTargets хранит цель (text/thinking) для каждого фрагмента ответа
+    // по порядку добавления: контент приходит по пути
+    // response/fragments/<N>/content, и тип (THINK/RESPONSE) известен только из
+    // момента создания фрагмента, а не из самого пути.
+    const patchState: {
+      lastTarget: "text" | "thinking";
+      fragmentTargets: Array<"text" | "thinking">;
+    } = {
+      lastTarget: "text",
+      fragmentTargets: [],
+    };
 
     const routeTextChunk = function* (
       rawText: string,
@@ -289,7 +301,15 @@ export class DeepSeekApiClient {
 
       if (toolCallHoldActive) {
         toolCallHoldBuffer += rawText;
-        if (toolCallHoldBuffer.length >= MAX_TOOLCALL_HOLD_BUFFER_CHARS) {
+        // Сбрасываем как текст только если буфер большой И не похож на настоящий
+        // tool_call. Крупные легитимные вызовы (целый файл в аргументах) держим
+        // до жёсткого предела.
+        const realToolCall = looksLikeToolCallStart(toolCallHoldBuffer);
+        const overSoftLimit =
+          toolCallHoldBuffer.length >= MAX_TOOLCALL_HOLD_BUFFER_CHARS;
+        const overHardCap =
+          toolCallHoldBuffer.length >= MAX_TOOLCALL_HARD_CAP_CHARS;
+        if ((overSoftLimit && !realToolCall) || overHardCap) {
           const sanitized = stripDanglingToolCallMarkers(toolCallHoldBuffer);
           if (sanitized) {
             emittedTextChunks++;
@@ -330,7 +350,7 @@ export class DeepSeekApiClient {
 
     const throwIfTimedOut = () => {
       if (Date.now() - lastActivityAt > STREAM_TIMEOUT_MS) {
-        throw new ProviderError(PROVIDER_ID, "Таймаут стрима DeepSeek");
+        throw new ProviderError(PROVIDER_ID, "DeepSeek stream timeout");
       }
     };
 
@@ -395,6 +415,7 @@ export class DeepSeekApiClient {
           const { text, thinking, messageId } = this.extractDeltaText(
             parsed,
             fragments,
+            patchState,
           );
           if (typeof messageId === "number") {
             options?.onMessageId?.(messageId);
@@ -439,6 +460,7 @@ export class DeepSeekApiClient {
         const { text, thinking, messageId } = this.extractDeltaText(
           parsed,
           fragments,
+          patchState,
         );
         if (typeof messageId === "number") {
           options?.onMessageId?.(messageId);
@@ -465,6 +487,7 @@ export class DeepSeekApiClient {
             const { text, thinking, messageId } = this.extractDeltaText(
               parsed,
               fragments,
+              patchState,
             );
             if (typeof messageId === "number") {
               options?.onMessageId?.(messageId);
@@ -581,26 +604,24 @@ export class DeepSeekApiClient {
   private resolveThinkingConfig(
     resolvedModelId: string,
     hasTools: boolean,
+    override?: "auto" | "on" | "off",
   ): {
     mode: "auto" | "on" | "off";
     enabled: boolean;
   } {
-    const cfg = vscode.workspace.getConfiguration("freeAI.deepseek");
-    const rawMode = String(cfg.get("thinkingMode", "auto")).toLowerCase();
-    const mode: "auto" | "on" | "off" =
-      rawMode === "on" || rawMode === "off" ? rawMode : "auto";
+    // Режим всегда "auto" (настройка убрана); override "off" приходит только от
+    // служебных запросов (коммиты/фиксы/inline-подсказки).
+    const mode: "auto" | "on" | "off" = override === "off" ? "off" : "auto";
 
     const thinkingSupported = supportsThinking(
       DEEPSEEK_MODELS,
       resolvedModelId,
     );
-    const enabled = thinkingSupported
-      ? mode === "on"
-        ? true
-        : mode === "off"
-          ? false
-          : !hasTools
-      : false;
+    // При наличии tools thinking выключаем всегда (даже при mode="on"): связка
+    // reasoning + инструменты на этом бэкенде ненадёжна — модель уводит tool_call
+    // в reasoning-канал или обрывает ход после преамбулы. В обычном чате (без
+    // tools) thinking работает по настройке.
+    const enabled = thinkingSupported && !hasTools && mode !== "off";
 
     return { mode, enabled };
   }
@@ -654,6 +675,10 @@ export class DeepSeekApiClient {
   private extractDeltaText(
     value: unknown,
     cache: Map<string, string>,
+    state: {
+      lastTarget: "text" | "thinking";
+      fragmentTargets: Array<"text" | "thinking">;
+    },
   ): { text: string; thinking: string; messageId: number | null } {
     let messageId: number | null = null;
     let text = "";
@@ -661,6 +686,29 @@ export class DeepSeekApiClient {
     const contentPathRe = /\/(content|text|answer)$/i;
     const thinkingPathRe =
       /\/(reasoning_content|reasoning|thinking|thinking_content|reasoning_text)$/i;
+    // Путь к контенту конкретного фрагмента: response/fragments/<N>/content,
+    // где N — индекс (в т.ч. отрицательный, -1 = последний фрагмент).
+    const fragmentContentPathRe = /\/fragments\/(-?\d+)\/content$/i;
+
+    // Определяет цель патча по его пути. Для фрагментов берём тип из
+    // зарегистрированного fragmentTargets, иначе — по thinking/content regex.
+    const resolveTargetForPath = (
+      p: string,
+    ): "text" | "thinking" | undefined => {
+      const fragMatch = fragmentContentPathRe.exec(p);
+      if (fragMatch) {
+        const rawIdx = Number(fragMatch[1]);
+        const list = state.fragmentTargets;
+        const idx = rawIdx < 0 ? list.length + rawIdx : rawIdx;
+        const target = list[idx];
+        if (target) return target;
+        // Тип фрагмента ещё не зарегистрирован — fallback на активную цель.
+        return state.lastTarget;
+      }
+      if (thinkingPathRe.test(p)) return "thinking";
+      if (contentPathRe.test(p)) return "text";
+      return undefined;
+    };
     const thinkTypeRe = /^(think|reason|reasoning|cot)$/i;
     const thinkingFieldRe =
       /^(reasoning|reasoning_content|reasoning_text|thinking|thinking_content|thought|thoughts|cot)$/i;
@@ -717,34 +765,26 @@ export class DeepSeekApiClient {
         messageId = rawId;
       }
 
-      if (
-        path === "$" &&
-        Object.keys(obj).length === 1 &&
-        typeof obj.v === "string"
-      ) {
-        text += obj.v;
-        return;
-      }
-
-      if (
-        obj.o === "APPEND" &&
-        typeof obj.p === "string" &&
-        typeof obj.v === "string"
-      ) {
-        if (thinkingPathRe.test(obj.p)) {
+      // Сокращённый патч {"v":"..."} без пути: продолжение предыдущего APPEND.
+      // Раньше срабатывал только на верхнем уровне (path === "$") и всегда уходил
+      // в text — из-за чего такие патчи внутри BATCH (path вида "$.v.0")
+      // ТЕРЯЛИСЬ (пропадали первые символы при пакетной отдаче токенов), а
+      // thinking-продолжения утекали в text. Теперь обрабатываем на любой глубине
+      // и направляем в активную цель.
+      if (Object.keys(obj).length === 1 && typeof obj.v === "string") {
+        if (state.lastTarget === "thinking") {
           thinking += obj.v;
-          return;
-        }
-        if (contentPathRe.test(obj.p)) {
+        } else {
           text += obj.v;
-          return;
         }
         return;
       }
 
       // DeepSeek patch-формат перехода think -> response часто идёт как:
       // 1) {"p":"response/fragments","o":"APPEND","v":[{"type":"RESPONSE"|"THINK", ...}]}
-      // 2) {"p":"response/fragments/-1/content","v":"..."}
+      // 2) {"p":"response/fragments/-1/content","o":"APPEND","v":"..."}
+      // Регистрацию фрагментов делаем ДО разбора APPEND, чтобы цель для
+      // последующего контента (think/response) уже была известна.
       if (
         obj.o === "APPEND" &&
         obj.p === "response/fragments" &&
@@ -760,6 +800,11 @@ export class DeepSeekApiClient {
           const target: "text" | "thinking" =
             thinkTypeRe.test(type) || type === "thinking" ? "thinking" : "text";
 
+          // Запоминаем цель фрагмента по порядку — контент придёт отдельно по
+          // пути response/fragments/<index>/content.
+          state.fragmentTargets.push(target);
+          state.lastTarget = target;
+
           if (!content) continue;
 
           const fragId =
@@ -773,22 +818,55 @@ export class DeepSeekApiClient {
       }
 
       if (
+        obj.o === "APPEND" &&
+        typeof obj.p === "string" &&
+        typeof obj.v === "string"
+      ) {
+        const target = resolveTargetForPath(obj.p);
+        if (target) {
+          state.lastTarget = target;
+          if (target === "thinking") {
+            thinking += obj.v;
+          } else {
+            text += obj.v;
+          }
+        }
+        return;
+      }
+
+      if (
         typeof obj.o === "string" &&
         ["SET", "REPLACE", "UPDATE", "INSERT"].includes(obj.o) &&
         typeof obj.p === "string" &&
         typeof obj.v === "string"
       ) {
-        const key = `${messageId ?? "unknown"}:${path}:${obj.p}`;
-
-        if (thinkingPathRe.test(obj.p)) {
-          appendCached(key, obj.v, "thinking");
-          return;
-        }
-        if (contentPathRe.test(obj.p)) {
-          appendCached(key, obj.v, "text");
-          return;
+        const target = resolveTargetForPath(obj.p);
+        if (target) {
+          state.lastTarget = target;
+          const key = `${messageId ?? "unknown"}:${path}:${obj.p}`;
+          appendCached(key, obj.v, target);
         }
         return;
+      }
+
+      // Патч контента без явного "o" (наследует предыдущую операцию APPEND):
+      // {"p":"response/fragments/-1/content","v":"..."} или {"p":"response/content","v":"..."}.
+      // Раньше такие события полностью терялись.
+      if (
+        obj.o === undefined &&
+        typeof obj.p === "string" &&
+        typeof obj.v === "string"
+      ) {
+        const target = resolveTargetForPath(obj.p);
+        if (target) {
+          state.lastTarget = target;
+          if (target === "thinking") {
+            thinking += obj.v;
+          } else {
+            text += obj.v;
+          }
+          return;
+        }
       }
 
       if (obj.o === "BATCH" && Array.isArray(obj.v)) {
@@ -987,7 +1065,7 @@ export class DeepSeekApiClient {
     if (!challenge) {
       throw new ProviderError(
         PROVIDER_ID,
-        `PoW challenge не получен: ${JSON.stringify(json).slice(0, 220)}`,
+        `PoW challenge not received: ${JSON.stringify(json).slice(0, 220)}`,
       );
     }
 
@@ -1031,7 +1109,7 @@ export class DeepSeekApiClient {
       }
       throw new ProviderError(
         PROVIDER_ID,
-        `Некорректный JSON от DeepSeek (${path}), status=${response.status}`,
+        `Invalid JSON from DeepSeek (${path}), status=${response.status}`,
         response.status,
       );
     }
@@ -1106,13 +1184,13 @@ export class DeepSeekApiClient {
     if (challenge.algorithm !== "DeepSeekHashV1") {
       throw new ProviderError(
         PROVIDER_ID,
-        `Неподдерживаемый PoW алгоритм: ${challenge.algorithm}`,
+        `Unsupported PoW algorithm: ${challenge.algorithm}`,
       );
     }
 
     const expireAt = challenge.expire_at ?? challenge.expireAt;
     if (!Number.isFinite(expireAt)) {
-      throw new ProviderError(PROVIDER_ID, "PoW challenge без expire_at");
+      throw new ProviderError(PROVIDER_ID, "PoW challenge without expire_at");
     }
 
     const solver = await this.getWasmSolver();
@@ -1127,7 +1205,7 @@ export class DeepSeekApiClient {
     if (typeof answer !== "number" || !Number.isInteger(answer)) {
       throw new ProviderError(
         PROVIDER_ID,
-        "PoW solver вернул некорректный ответ",
+        "PoW solver returned an invalid answer",
       );
     }
 

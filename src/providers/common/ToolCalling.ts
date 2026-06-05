@@ -105,6 +105,53 @@ function findJsonToolCallStart(text: string): number {
 }
 
 /**
+ * Похоже ли накопленное на настоящий tool_call (а не ложное срабатывание
+ * маркера вроде markdown code-block). Используется, чтобы не «сбрасывать»
+ * большие легитимные вызовы (например replace_string_in_file с целым файлом)
+ * как обычный текст при достижении лимита hold-буфера.
+ */
+export function looksLikeToolCallStart(text: string): boolean {
+  return (
+    /```tool_call/i.test(text) ||
+    /<tool_call>/i.test(text) ||
+    /"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:/.test(text) ||
+    /"arguments"\s*:\s*\{/.test(text)
+  );
+}
+
+/**
+ * Удаляет из текста сбалансированные JSON-объекты tool-call формата
+ * ({"name":..., "arguments":{...}}), корректно учитывая вложенные скобки и
+ * строки. Regex-замены с `\{[\s\S]*?\}` ломались на вложенных `}` внутри
+ * строковых значений (большие oldString/newString) и оставляли JSON в чате.
+ */
+export function stripInlineToolCallJson(text: string): string {
+  let result = "";
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === "{") {
+      const extracted = extractBalancedJsonAt(text, i);
+      if (extracted) {
+        const parsed = tryParseJson(extracted.json);
+        const isToolCall =
+          !!parsed &&
+          typeof parsed.name === "string" &&
+          (parsed.arguments !== undefined ||
+            parsed.params !== undefined ||
+            parsed.input !== undefined);
+        if (isToolCall) {
+          i = extracted.end;
+          continue;
+        }
+      }
+    }
+    result += text[i];
+    i++;
+  }
+  return result;
+}
+
+/**
  * Универсальный фабричный helper для формирования tool_call чанка.
  * Используется всеми провайдерами и парсерами, чтобы структура была единообразной.
  */

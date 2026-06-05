@@ -52,7 +52,7 @@ export class QwenProvider extends BaseAIProvider {
     if (!chatId) {
       chatId = await this.apiClient.createChat(token, params.model);
       if (!chatId) {
-        throw new Error("Не удалось создать chat_id для Qwen");
+        throw new Error("Failed to create chat_id for Qwen");
       }
       this.chatIdByConversation.set(conversationKey, chatId);
       log(
