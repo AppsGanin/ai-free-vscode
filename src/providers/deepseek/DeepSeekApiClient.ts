@@ -633,7 +633,12 @@ export class DeepSeekApiClient {
     const parts: string[] = [];
 
     if (toolsPrompt) {
+      // toolsPrompt уже содержит инструкцию про язык ответа.
       parts.push(`System: ${toolsPrompt}`);
+    } else {
+      parts.push(
+        "System: Always answer in the same language as the latest user message. Never switch language unless the user explicitly asks.",
+      );
     }
 
     for (const msg of messages) {
@@ -1161,7 +1166,7 @@ export class DeepSeekApiClient {
       "User-Agent":
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
       Accept: "*/*",
-      "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+      "Accept-Language": "en-US,en;q=0.9",
       "Content-Type": "application/json",
       Origin: BASE_URL,
       Referer: `${BASE_URL}/`,
@@ -1169,7 +1174,7 @@ export class DeepSeekApiClient {
       "X-App-Version": APP_VERSION,
       "x-client-platform": "web",
       "x-client-version": APP_VERSION,
-      "x-client-locale": "ru",
+      "x-client-locale": "en",
       "x-client-timezone-offset": timezoneOffset,
     };
 

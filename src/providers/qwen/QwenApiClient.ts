@@ -411,7 +411,7 @@ export class QwenApiClient {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
         Accept: "*/*",
-        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Language": "en-US,en;q=0.9",
         Origin: "https://chat.qwen.ai",
         Referer: "https://chat.qwen.ai/",
         "User-Agent":
