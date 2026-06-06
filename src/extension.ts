@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { log, setOutputChannel } from "./logger";
 import { UnifiedProvider } from "./providers/UnifiedProvider";
 import { DeepSeekProvider } from "./providers/deepseek/DeepSeekProvider";
+import { KimiProvider } from "./providers/kimi/KimiProvider";
 import { QwenProvider } from "./providers/qwen/QwenProvider";
 import { AuthExpiredError, RateLimitError } from "./providers/types";
 import { registerCommitMessageCommands } from "./vscode/CommitMessageGenerator";
@@ -22,7 +23,12 @@ export function activate(context: vscode.ExtensionContext): void {
   // Единый провайдер для общего списка моделей в VS Code model picker.
   const qwenProvider = new QwenProvider();
   const deepSeekProvider = new DeepSeekProvider();
-  const unifiedProvider = new UnifiedProvider([qwenProvider, deepSeekProvider]);
+  const kimiProvider = new KimiProvider();
+  const unifiedProvider = new UnifiedProvider([
+    qwenProvider,
+    deepSeekProvider,
+    kimiProvider,
+  ]);
   registry.register(unifiedProvider);
 
   // ─── Слушаем ошибки авторизации от провайдеров ────────────────────────────
@@ -95,6 +101,26 @@ export function activate(context: vscode.ExtensionContext): void {
     // Status
     context.subscriptions.push(
       vscode.commands.registerCommand(`${id}.status`, async () => {
+        // Для составного провайдера показываем разбивку по каждому под-провайдеру
+        // (какой залогинен, а какой нет), а не общий «signed in ✓».
+        if (provider instanceof UnifiedProvider) {
+          const states = await provider.getProviderAuthStates(context.secrets);
+          const lines = states
+            .map((s) => `${s.authenticated ? "✓" : "✗"} ${s.name}`)
+            .join("\n");
+          const anyMissing = states.some((s) => !s.authenticated);
+
+          const action = await vscode.window.showInformationMessage(
+            `${provider.displayName} — sign-in status`,
+            { modal: true, detail: lines },
+            ...(anyMissing ? ["Sign In"] : []),
+          );
+          if (action === "Sign In") {
+            await vscode.commands.executeCommand(`${id}.login`);
+          }
+          return;
+        }
+
         const isAuth = await provider.isAuthenticated(context.secrets);
         if (isAuth) {
           vscode.window.showInformationMessage(

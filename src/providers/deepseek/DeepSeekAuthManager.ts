@@ -3,9 +3,12 @@ import * as os from "os";
 import * as path from "path";
 import { chromium } from "playwright";
 import * as vscode from "vscode";
+import { createLogger, errToString } from "../../logger";
 
 const AUTH_SECRET_KEY = "ai-free-vscode.deepseek.auth";
 const DEEPSEEK_HOME_URL = "https://chat.deepseek.com";
+
+const dlog = createLogger("deepseek-auth");
 
 const BROWSER_DATA_DIR = path.join(
   os.homedir(),
@@ -23,6 +26,7 @@ export class DeepSeekAuthManager {
     const config = vscode.workspace.getConfiguration("freeAI");
     const timeoutMs = config.get<number>("playwright.timeout", 120000);
 
+    dlog.info("login: opening browser");
     const context = await this.launchContext();
     const page = context.pages()[0] ?? (await context.newPage());
 
@@ -31,6 +35,7 @@ export class DeepSeekAuthManager {
       // очищаем cookies до начала нового login-flow.
       await context.clearCookies().catch(() => undefined);
 
+      dlog.debug(`login: navigating to ${DEEPSEEK_HOME_URL}`);
       await page.goto(DEEPSEEK_HOME_URL, {
         waitUntil: "domcontentloaded",
         timeout: 30000,
@@ -54,6 +59,9 @@ export class DeepSeekAuthManager {
 
       await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
 
+      dlog.info(
+        `login: waiting for sign-in (timeout=${Math.round(timeoutMs / 1000)}s)`,
+      );
       const capturedToken = await this.waitForAuthApiCall(context, timeoutMs);
       const token =
         this.normalizeToken(capturedToken) ??
@@ -63,6 +71,7 @@ export class DeepSeekAuthManager {
       const cookieHeader = this.cookiesToHeader(cookies);
 
       if (!cookieHeader.includes("ds_session_id=")) {
+        dlog.warn("login: ds_session_id cookie missing (sign-in incomplete)");
         throw new Error(
           "Failed to get DeepSeek cookies (ds_session_id). Sign in and try again.",
         );
@@ -74,6 +83,10 @@ export class DeepSeekAuthManager {
       };
 
       await secrets.store(AUTH_SECRET_KEY, JSON.stringify(payload));
+      dlog.info(`login: success, token=${token ? "yes" : "no"}, cookie stored`);
+    } catch (err) {
+      dlog.error(`login: failed — ${errToString(err)}`);
+      throw err;
     } finally {
       await context.close();
     }
@@ -84,6 +97,7 @@ export class DeepSeekAuthManager {
     await rm(BROWSER_DATA_DIR, { recursive: true, force: true }).catch(
       () => {},
     );
+    dlog.info("logout: token and browser profile cleared");
   }
 
   async isAuthenticated(secrets: vscode.SecretStorage): Promise<boolean> {
@@ -96,6 +110,7 @@ export class DeepSeekAuthManager {
   ): Promise<DeepSeekAuthPayload | undefined> {
     const raw = await secrets.get(AUTH_SECRET_KEY);
     if (!raw) {
+      dlog.debug("getAuth: no stored auth");
       return undefined;
     }
 
@@ -104,10 +119,12 @@ export class DeepSeekAuthManager {
       const token = this.normalizeToken(parsed.token);
       const cookieHeader = String(parsed.cookieHeader ?? "").trim();
       if (!cookieHeader) {
+        dlog.debug("getAuth: stored cookie empty");
         return undefined;
       }
       return { token, cookieHeader };
-    } catch {
+    } catch (err) {
+      dlog.warn(`getAuth: parse failed — ${errToString(err)}`);
       return undefined;
     }
   }

@@ -85,6 +85,11 @@
           "default": 120000,
           "description": "Browser sign-in timeout in milliseconds"
         },
+        "freeAI.debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable verbose DEBUG logs in the 'AI Free VSCode' output channel (auth flow, requests, streaming). Useful for troubleshooting."
+        },
         "freeAI.commit.model": {
           "type": "string",
           "default": "auto",

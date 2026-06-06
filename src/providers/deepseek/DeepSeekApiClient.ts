@@ -1,12 +1,9 @@
 import { log } from "../../logger";
 import { supportsThinking } from "../common/ModelCapabilities";
+import { StreamingToolCallRouter } from "../common/StreamingToolCallRouter";
 import {
   buildToolsSystemPrompt,
-  findToolCallMarkerStart,
-  looksLikeToolCallStart,
-  parseToolCallsFromText,
   selectToolsForPrompt,
-  stripInlineToolCallJson,
 } from "../common/ToolCalling";
 import type { AIMessage, AIRequestParams, AIStreamChunk } from "../types";
 import { AuthExpiredError, ProviderError, RateLimitError } from "../types";
@@ -27,14 +24,6 @@ const DEEPSEEK_SHA3_WASM =
   "https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm";
 
 const STREAM_TIMEOUT_MS = 30000;
-const TOOL_MARKER_HOLDBACK_CHARS = 11;
-// Если hold-буфер вырос настолько — это почти наверняка ложное срабатывание
-// маркера (обычный markdown/код), а не tool call. Сбрасываем как текст, чтобы
-// не ждать конца SSE-потока.
-const MAX_TOOLCALL_HOLD_BUFFER_CHARS = 4096;
-// Жёсткий предел для подтверждённых tool_call (большие аргументы вроде целого
-// файла в replace_string_in_file): держим до этого размера, прежде чем сдаться.
-const MAX_TOOLCALL_HARD_CAP_CHARS = 262144;
 
 export interface DeepSeekAuthState {
   token?: string;
@@ -69,63 +58,6 @@ interface DeepSeekResponseJson {
 }
 
 let wasmSolverPromise: Promise<DeepSeekHash> | undefined;
-
-function stripDanglingToolCallMarkers(text: string): string {
-  return text
-    .replace(/```tool_call\s*```?/gi, "")
-    .replace(/```tool_call\s*$/gim, "")
-    .replace(/^\s*```tool_call\s*\n?/gim, "")
-    .replace(/^\s*<tool_call>\s*$/gim, "")
-    .trim();
-}
-
-function sanitizeProtocolTranscript(text: string): string {
-  if (!text) return "";
-
-  let sanitized = text;
-
-  // Убираем fenced tool_call блоки целиком, но оставляем разделители,
-  // чтобы текст до/после не склеивался.
-  sanitized = sanitized.replace(/```tool_call[\s\S]*?```/gi, "\n\n");
-  // Убираем XML-подобный формат.
-  sanitized = sanitized.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "\n\n");
-  // Сбалансированное удаление inline JSON tool-call (учитывает вложенные `}`
-  // в больших строковых аргументах).
-  sanitized = stripInlineToolCallJson(sanitized);
-
-  // Убираем явные служебные строки, не трогая прочий текст.
-  sanitized = sanitized.replace(
-    /^\s*User:\s*\[Tool result id=[^\]]+\][\s\S]*?(?=^\s*(Assistant:|User:|Tool:)|\Z)/gim,
-    "\n",
-  );
-  sanitized = sanitized.replace(
-    /^\s*(?:User:\s*)?\[(?:Tool result id=[^\]]+|toolu_[^\]]+)\][\s\S]*?(?=^\s*(Assistant:|User:|Tool:)|\Z)/gim,
-    "\n",
-  );
-  sanitized = sanitized.replace(
-    /^\s*\{\s*"status"\s*:\s*"success"[\s\S]*?"type"\s*:\s*"[^\"]*_result"[\s\S]*?(?=^\s*(Assistant:|User:|Tool:)|\Z)/gim,
-    "\n",
-  );
-  sanitized = sanitized.replace(/^\s*tool_call\s*$/gim, "\n");
-  sanitized = sanitized.replace(/^\s*Tool:\s.*$/gim, "\n");
-  sanitized = sanitized.replace(/^\s*User:\s*Tool result:.*$/gim, "\n");
-  sanitized = sanitized.replace(/^\s*User:\s*\[call_[^\]]+\].*$/gim, "\n");
-  sanitized = sanitized.replace(
-    /^\s*\/Users\/[^\n]*chat-session-resources[^\n]*$/gim,
-    "\n",
-  );
-  // Если модель начала печатать роль Assistant, оставляем только контент.
-  sanitized = sanitized.replace(/^\s*Assistant:\s?/gim, "");
-
-  // Мягкая нормализация без trim(), чтобы не срезать стартовые пробелы/символы чанка.
-  // Убираем только полностью пустые markdown code fences.
-  sanitized = sanitized.replace(/```[a-zA-Z0-9_-]*\s*\n\s*```/g, "\n");
-
-  sanitized = sanitized.replace(/[ \t]{2,}/g, " ");
-  sanitized = sanitized.replace(/\n{3,}/g, "\n\n");
-
-  return sanitized;
-}
 
 type DeepSeekWasmExports = {
   memory: WebAssembly.Memory;
@@ -267,9 +199,11 @@ export class DeepSeekApiClient {
     let parsedEventsCount = 0;
     let emittedTextChunks = 0;
     let emittedThinkingChunks = 0;
-    let pendingBuffer = "";
-    let toolCallHoldBuffer = "";
-    let toolCallHoldActive = false;
+    const router = new StreamingToolCallRouter(
+      allowToolCalls,
+      log,
+      "[deepseek-api] ",
+    );
     // DeepSeek-патчи для одного и того же пути приходят сокращённо: первый раз
     // {"p":"response/content","o":"APPEND","v":"H"}, далее просто {"v":"e"}.
     // Чтобы такие "хвостовые" патчи (в т.ч. внутри BATCH) не терялись и не
@@ -286,65 +220,15 @@ export class DeepSeekApiClient {
       fragmentTargets: [],
     };
 
+    // Обёртка над общим роутером: считает отданные text-чанки для диагностики.
     const routeTextChunk = function* (
       rawText: string,
     ): Iterable<AIStreamChunk> {
-      if (!rawText) {
-        return;
-      }
-
-      if (!allowToolCalls) {
-        emittedTextChunks++;
-        yield { type: "text", content: rawText };
-        return;
-      }
-
-      if (toolCallHoldActive) {
-        toolCallHoldBuffer += rawText;
-        // Сбрасываем как текст только если буфер большой И не похож на настоящий
-        // tool_call. Крупные легитимные вызовы (целый файл в аргументах) держим
-        // до жёсткого предела.
-        const realToolCall = looksLikeToolCallStart(toolCallHoldBuffer);
-        const overSoftLimit =
-          toolCallHoldBuffer.length >= MAX_TOOLCALL_HOLD_BUFFER_CHARS;
-        const overHardCap =
-          toolCallHoldBuffer.length >= MAX_TOOLCALL_HARD_CAP_CHARS;
-        if ((overSoftLimit && !realToolCall) || overHardCap) {
-          const sanitized = stripDanglingToolCallMarkers(toolCallHoldBuffer);
-          if (sanitized) {
-            emittedTextChunks++;
-            yield { type: "text", content: sanitized };
-          }
-          toolCallHoldBuffer = "";
-          toolCallHoldActive = false;
-        }
-        return;
-      }
-
-      pendingBuffer += rawText;
-      const markerIdx = findToolCallMarkerStart(pendingBuffer);
-
-      if (markerIdx !== -1) {
-        const safeText = pendingBuffer.slice(0, markerIdx);
-        if (safeText) {
+      for (const chunk of router.route(rawText)) {
+        if (chunk.type === "text") {
           emittedTextChunks++;
-          yield { type: "text", content: safeText };
         }
-        toolCallHoldBuffer = pendingBuffer.slice(markerIdx);
-        pendingBuffer = "";
-        toolCallHoldActive = true;
-      } else if (pendingBuffer.length > TOOL_MARKER_HOLDBACK_CHARS) {
-        const safeText = pendingBuffer.slice(
-          0,
-          pendingBuffer.length - TOOL_MARKER_HOLDBACK_CHARS,
-        );
-        if (safeText) {
-          emittedTextChunks++;
-          yield { type: "text", content: safeText };
-        }
-        pendingBuffer = pendingBuffer.slice(
-          pendingBuffer.length - TOOL_MARKER_HOLDBACK_CHARS,
-        );
+        yield chunk;
       }
     };
 
@@ -512,52 +396,13 @@ export class DeepSeekApiClient {
       }
     }
 
-    if (allowToolCalls) {
-      // Текст, удержанный маркером (потенциальный tool call), и обычный
-      // holdback-хвост разделяем явно. Сбрасываем состояние, чтобы прямые yield
-      // ниже не попали обратно в hold-буфер.
-      const holdBuffer = toolCallHoldActive ? toolCallHoldBuffer : "";
-      const tailText = toolCallHoldActive ? "" : pendingBuffer;
-      pendingBuffer = "";
-      toolCallHoldBuffer = "";
-      toolCallHoldActive = false;
-
-      if (holdBuffer) {
-        const parsedChunks = Array.from(parseToolCallsFromText(holdBuffer));
-        const toolChunks = parsedChunks.filter((c) => c.type === "tool_call");
-        const sanitizedTextRemainder = sanitizeProtocolTranscript(
-          stripDanglingToolCallMarkers(holdBuffer),
-        );
-
-        if (toolChunks.length > 0) {
-          for (const chunk of toolChunks) {
-            yield chunk;
-          }
-
-          // DeepSeek может присылать обычный текст рядом с tool call. Отдаём
-          // очищенный остаток НАПРЯМУЮ — через routeTextChunk он бы снова попал
-          // в hold-буфер и потерялся.
-          if (sanitizedTextRemainder) {
-            emittedTextChunks++;
-            yield { type: "text", content: sanitizedTextRemainder };
-          }
-        } else {
-          // Ложное срабатывание маркера. Если очистка оставила пусто —
-          // отдаём исходный буфер, чтобы не получить пустой ответ.
-          const textOut = sanitizedTextRemainder || holdBuffer.trim();
-          if (textOut) {
-            emittedTextChunks++;
-            yield { type: "text", content: textOut };
-          }
-        }
-      }
-
-      // Обычный holdback-хвост (без маркера) отдаём как есть.
-      if (tailText) {
+    // Сброс остатка буфера: парсинг tool_call либо отдача текста. Роутер
+    // корректно работает и в режиме без инструментов (отдаёт хвост как текст).
+    for (const chunk of router.finish()) {
+      if (chunk.type === "text") {
         emittedTextChunks++;
-        yield { type: "text", content: tailText };
       }
-      return;
+      yield chunk;
     }
 
     if (

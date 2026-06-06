@@ -90,6 +90,25 @@ export class UnifiedProvider extends BaseAIProvider {
     return normalized || provider.id;
   }
 
+  /**
+   * Состояние авторизации по каждому под-провайдеру — для детального статуса
+   * в UI (какой провайдер залогинен, а какой нет).
+   */
+  async getProviderAuthStates(
+    secrets: vscode.SecretStorage,
+  ): Promise<Array<{ id: string; name: string; authenticated: boolean }>> {
+    const states: Array<{ id: string; name: string; authenticated: boolean }> =
+      [];
+    for (const provider of this.providers) {
+      states.push({
+        id: provider.id,
+        name: this.getProviderTag(provider),
+        authenticated: await provider.isAuthenticated(secrets),
+      });
+    }
+    return states;
+  }
+
   async isAuthenticated(secrets: vscode.SecretStorage): Promise<boolean> {
     for (const provider of this.providers) {
       if (await provider.isAuthenticated(secrets)) {
@@ -101,11 +120,6 @@ export class UnifiedProvider extends BaseAIProvider {
 
   async login(secrets: vscode.SecretStorage): Promise<void> {
     const picks = [
-      {
-        label: "All providers",
-        description: "Sign in to all",
-        value: "all" as const,
-      },
       ...this.providers.map((provider) => ({
         label: provider.displayName,
         description: provider.id,
@@ -142,11 +156,6 @@ export class UnifiedProvider extends BaseAIProvider {
 
   async logout(secrets: vscode.SecretStorage): Promise<void> {
     const picks = [
-      {
-        label: "All providers",
-        description: "Sign out of all",
-        value: "all" as const,
-      },
       ...this.providers.map((provider) => ({
         label: provider.displayName,
         description: provider.id,

@@ -1,11 +1,9 @@
 import { log } from "../../logger";
 import { supportsThinking } from "../common/ModelCapabilities";
+import { StreamingToolCallRouter } from "../common/StreamingToolCallRouter";
 import {
   buildToolsSystemPrompt,
   createToolCallChunk,
-  findToolCallMarkerStart,
-  looksLikeToolCallStart,
-  parseToolCallsFromText,
   selectToolsForPrompt,
 } from "../common/ToolCalling";
 import type { AIMessage, AIRequestParams, AIStreamChunk } from "../types";
@@ -19,10 +17,6 @@ const PROVIDER_ID = "ai-free-vscode";
 
 const MAX_PROMPT_CHARS = 500000;
 const MAX_SYSTEM_MESSAGE_CHARS = 100000;
-const MAX_TOOLCALL_HOLD_BUFFER_CHARS = 4096;
-// Жёсткий предел для подтверждённых tool_call (большие аргументы вроде целого
-// файла в replace_string_in_file): держим до этого размера, прежде чем сдаться.
-const MAX_TOOLCALL_HARD_CAP_CHARS = 262144;
 const MAX_TOOLMODE_NO_TOOLCALL_MS = 20000;
 const MAX_TOOLMODE_NO_TOOLCALL_CHARS = 12000;
 const MIN_TOOLMODE_GUARD_TEXT_CHARS = 64;
@@ -120,15 +114,6 @@ function stringifyUnknown(value: unknown, maxLen = 600): string {
   }
 
   return String(value);
-}
-
-function stripDanglingToolCallMarkers(text: string): string {
-  return text
-    .replace(/```tool_call\s*```?/gi, "")
-    .replace(/```tool_call\s*$/gim, "")
-    .replace(/^\s*```tool_call\s*\n?/gim, "")
-    .replace(/^\s*<tool_call>\s*$/gim, "")
-    .trim();
 }
 
 export class QwenApiClient {
@@ -726,13 +711,13 @@ export class QwenApiClient {
     let lastCompletionTokens = 0;
     let streamedTextChars = 0;
 
-    // Скользящее окно для обнаружения tool call маркеров при стриминге.
-    // pendingBuffer: хвост текста, который ещё не отдан (может быть началом маркера).
-    // toolCallHoldBuffer: текст начиная с маркера (буферизуется до конца стрима).
-    // toolCallHoldActive: true когда маркер найден и идёт буферизация.
-    let pendingBuffer = "";
-    let toolCallHoldBuffer = "";
-    let toolCallHoldActive = false;
+    // Маршрутизатор текстового канала: скользящим окном ловит ```tool_call```
+    // маркеры в стриме и придерживает потенциальный вызов до конца.
+    const router = new StreamingToolCallRouter(
+      allowToolCalls,
+      log,
+      "[qwen-api] ",
+    );
 
     let sseRawLength = 0;
     let sseLineCount = 0;
@@ -831,64 +816,13 @@ export class QwenApiClient {
           }
           fullText += contentText;
 
-          if (!allowToolCalls) {
-            // Без инструментов — стримим немедленно
-            streamedTextChars += contentText.length;
-            yield { type: "text", content: contentText };
-          } else if (toolCallHoldActive) {
-            // Маркер уже найден — всё буферизуем
-            toolCallHoldBuffer += contentText;
-
-            // Anti-stall: если буфер большой И не похож на настоящий tool_call,
-            // это ложное срабатывание (обычный markdown/code block) — сбрасываем
-            // как текст. Но крупные легитимные вызовы (например целый файл в
-            // аргументах) удерживаем вплоть до жёсткого предела.
-            const realToolCall = looksLikeToolCallStart(toolCallHoldBuffer);
-            const overSoftLimit =
-              toolCallHoldBuffer.length >= MAX_TOOLCALL_HOLD_BUFFER_CHARS;
-            const overHardCap =
-              toolCallHoldBuffer.length >= MAX_TOOLCALL_HARD_CAP_CHARS;
-            if ((overSoftLimit && !realToolCall) || overHardCap) {
-              log(
-                `[qwen-api] hold buffer bailout length=${toolCallHoldBuffer.length} realToolCall=${realToolCall}, flushing as text`,
-              );
-              const sanitized =
-                stripDanglingToolCallMarkers(toolCallHoldBuffer);
-              if (sanitized) {
-                streamedTextChars += sanitized.length;
-                yield { type: "text", content: sanitized };
-              }
-              toolCallHoldBuffer = "";
-              toolCallHoldActive = false;
+          // Текстовый канал маршрутизируем через общий роутер (ловит/придерживает
+          // ```tool_call``` маркеры). Нативные tool_calls обрабатываются отдельно ниже.
+          for (const chunk of router.route(contentText)) {
+            if (chunk.type === "text") {
+              streamedTextChars += chunk.content.length;
             }
-          } else {
-            // Скользящее окно: накапливаем в pendingBuffer, сбрасываем безопасный префикс
-            pendingBuffer += contentText;
-            const HOLDBACK = 11; // длина самого длинного маркера - 1 = "```tool_call".length - 1
-            const markerIdx = findToolCallMarkerStart(pendingBuffer);
-            if (markerIdx !== -1) {
-              // Найден маркер или его начало — стримим только безопасный префикс
-              const safe = pendingBuffer.slice(0, markerIdx);
-              if (safe) {
-                streamedTextChars += safe.length;
-                yield { type: "text", content: safe };
-              }
-              toolCallHoldBuffer = pendingBuffer.slice(markerIdx);
-              pendingBuffer = "";
-              toolCallHoldActive = true;
-            } else if (pendingBuffer.length > HOLDBACK) {
-              // Маркера нет — стримим всё кроме последних HOLDBACK символов
-              const safe = pendingBuffer.slice(
-                0,
-                pendingBuffer.length - HOLDBACK,
-              );
-              streamedTextChars += safe.length;
-              yield { type: "text", content: safe };
-              pendingBuffer = pendingBuffer.slice(
-                pendingBuffer.length - HOLDBACK,
-              );
-            }
-            // pendingBuffer <= HOLDBACK — ждём следующего чанка
+            yield chunk;
           }
         }
 
@@ -983,7 +917,7 @@ export class QwenApiClient {
         allowToolCalls &&
         nativeToolCalls.length === 0 &&
         fullText.length > 0 &&
-        !toolCallHoldActive
+        !router.holding
       ) {
         const elapsedSinceAnswerMs =
           firstAnswerAt !== undefined ? Date.now() - firstAnswerAt : 0;
@@ -1013,13 +947,6 @@ export class QwenApiClient {
       yield* processLine(buffer);
     }
 
-    // Сброс pendingBuffer (holdback для частичных маркеров в конце потока)
-    if (!toolCallHoldActive && pendingBuffer) {
-      streamedTextChars += pendingBuffer.length;
-      yield { type: "text", content: pendingBuffer };
-      pendingBuffer = "";
-    }
-
     log(`[qwen-api] SSE text length=${sseRawLength} lines=${sseLineCount}`);
     for (let i = 0; i < firstLines.length; i++) {
       log(`[qwen-api] line[${i}]: ${firstLines[i].slice(0, 200)}`);
@@ -1028,39 +955,26 @@ export class QwenApiClient {
     let emittedAnything = streamedTextChars > 0;
 
     if (allowToolCalls && nativeToolCalls.length > 0) {
+      // Нативные tool_calls имеют приоритет; удержанный текст не превращаем в
+      // дублирующий вызов — отдаём его как обычный текст.
       log(`[qwen-api] native toolCalls=${nativeToolCalls.length}`);
+      for (const chunk of router.finishAsText()) {
+        if (chunk.type === "text") {
+          streamedTextChars += chunk.content.length;
+        }
+        yield chunk;
+      }
       yield* nativeToolCalls;
       emittedAnything = true;
-    } else if (allowToolCalls && toolCallHoldActive) {
-      // Маркер был найден — парсим буферизованный текст
-      log(
-        `[qwen-api] parsing tool calls from hold buffer length=${toolCallHoldBuffer.length}`,
-      );
-      const parsedChunks = Array.from(
-        parseToolCallsFromText(toolCallHoldBuffer, {
-          logger: log,
-          logPrefix: "[qwen-api] ",
-        }),
-      );
-      const toolChunks = parsedChunks.filter((c) => c.type === "tool_call");
-
-      if (toolChunks.length > 0) {
-        for (const c of toolChunks) {
-          yield c;
+    } else {
+      // Парсим удержанный текст в tool_call либо отдаём как текст (роутер
+      // корректно работает и без инструментов — там хвост уйдёт как текст).
+      for (const chunk of router.finish()) {
+        if (chunk.type === "text") {
+          streamedTextChars += chunk.content.length;
         }
+        yield chunk;
         emittedAnything = true;
-      } else {
-        // Ложное срабатывание (например, code block с ```) — отдаём текст.
-        // Если очистка маркеров оставила пусто, используем исходный буфер,
-        // чтобы не получить пустой ответ в чате.
-        const sanitized =
-          stripDanglingToolCallMarkers(toolCallHoldBuffer) ||
-          toolCallHoldBuffer.trim();
-        if (sanitized) {
-          streamedTextChars += sanitized.length;
-          yield { type: "text", content: sanitized };
-          emittedAnything = true;
-        }
       }
     }
 

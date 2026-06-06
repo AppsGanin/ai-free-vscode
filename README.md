@@ -12,7 +12,7 @@
 
 ## What it does
 
-- ✅ Integrates free Qwen and DeepSeek models into Copilot Chat
+- ✅ Integrates free Qwen, DeepSeek, and Kimi models into Copilot Chat
 - ✅ Requires no API keys and does not use paid OpenAI endpoints
 - ✅ Authenticates via a real browser session
 - ✅ Supports streaming, automatic thinking mode, and tool calling
@@ -58,11 +58,24 @@ dead entries that fail on use.
 | -------- | ------------------ | ------- |
 | DeepSeek | `deepseek-default` | 128K    |
 
+### Kimi
+
+| Model     | ID          | Context |
+| --------- | ----------- | ------- |
+| Kimi K2.5 | `kimi-k2.5` | 128K    |
+
+> ⚠️ **Tool calling is disabled for Kimi** (it is not advertised as a
+> tool-capable model, so VS Code won't pick it for agent/tool turns). Instead of
+> the text tool-call protocol, Kimi falls back to its built-in `ipython` code
+> interpreter and runs a server-side agent loop we cannot feed results to —
+> slow (often minutes) and unreliable. Use Kimi for plain chat; pick Qwen or
+> DeepSeek when you need tools.
+
 ## How it works
 
 1. The extension registers a single Copilot Chat provider: `ai-free-vscode`.
 2. Signing in launches Playwright and stores the authenticated session in `SecretStorage`.
-3. Requests are routed through private Qwen and DeepSeek API streams.
+3. Requests are routed through private Qwen, DeepSeek, and Kimi API streams.
 4. Responses are delivered to VS Code as streamed chunks.
 5. The extension handles tool calling and thinking-mode when available.
 
@@ -77,7 +90,7 @@ dead entries that fail on use.
 1. Open Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`).
 2. Run the sign-in command:
    - `AI Free VSCode — Sign In`
-3. Choose a provider: Qwen, DeepSeek, or `All providers`.
+3. Choose a provider: Qwen, DeepSeek, Kimi.
 4. Sign in with your browser and wait for success.
 5. Open Copilot Chat and select a model.
 

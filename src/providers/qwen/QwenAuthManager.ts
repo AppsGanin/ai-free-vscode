@@ -3,6 +3,7 @@ import * as os from "os";
 import * as path from "path";
 import { chromium } from "playwright";
 import * as vscode from "vscode";
+import { createLogger, errToString } from "../../logger";
 
 const TOKEN_SECRET_KEY = "ai-free-vscode.token";
 const LEGACY_TOKEN_SECRET_KEYS = ["qwen-free.token"];
@@ -20,6 +21,8 @@ const BROWSER_DATA_DIR = path.join(
   "browser-profile",
 );
 
+const qlog = createLogger("qwen-auth");
+
 export class QwenAuthManager {
   /**
    * Запускает реальный Chrome с постоянным профилем, открывает страницу авторизации Qwen.
@@ -34,6 +37,7 @@ export class QwenAuthManager {
     // channel: 'chrome' — использует системный Chrome вместо встроенного Chromium.
     // Это позволяет Google OAuth работать, так как Chrome не помечается как автоматизированный.
     // Fallback: если Chrome не установлен — используем встроенный Chromium.
+    qlog.info("login: opening browser");
     const browserContext = await this.launchContext(timeoutMs);
 
     const page = await browserContext.newPage();
@@ -49,6 +53,7 @@ export class QwenAuthManager {
         }
       });
 
+      qlog.debug(`login: navigating to ${QWEN_AUTH_URL}`);
       await page.goto(QWEN_AUTH_URL, {
         waitUntil: "domcontentloaded",
         timeout: 30000,
@@ -57,6 +62,9 @@ export class QwenAuthManager {
       // Ждём фактическое получение токена.
       // Это надёжнее, чем ждать конкретный URL, потому что OAuth может показывать
       // несколько промежуточных экранов и редиректов.
+      qlog.info(
+        `login: waiting for sign-in (timeout=${Math.round(timeoutMs / 1000)}s)`,
+      );
       const token = await this.waitForToken(
         page,
         timeoutMs,
@@ -64,12 +72,17 @@ export class QwenAuthManager {
       );
 
       if (!token) {
+        qlog.warn("login: token not captured within timeout");
         throw new Error(
           "Failed to extract the auth token after sign-in. Try again.",
         );
       }
 
       await secrets.store(TOKEN_SECRET_KEY, token);
+      qlog.info("login: success, token stored");
+    } catch (err) {
+      qlog.error(`login: failed — ${errToString(err)}`);
+      throw err;
     } finally {
       await browserContext.close();
     }
@@ -154,6 +167,7 @@ export class QwenAuthManager {
     await rm(BROWSER_DATA_DIR, { recursive: true, force: true }).catch(
       () => {},
     );
+    qlog.info("logout: token and browser profile cleared");
   }
 
   /**
