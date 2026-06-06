@@ -309,6 +309,12 @@ export class KimiApiClient {
               yield* handleMessage.call(this, parsed);
             }
           }
+          // Транскрипт-страж в роутере распознал фейковый следующий ход —
+          // прекращаем чтение (reader.cancel в finally закроет соединение).
+          if (router.cut) {
+            log.debug("transcript boundary detected — stopping stream");
+            done = true;
+          }
           if (done) {
             break;
           }

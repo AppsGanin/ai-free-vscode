@@ -233,6 +233,12 @@ export function buildToolsSystemPrompt(tools: AIToolDefinition[]): string {
     "Alternative accepted format (fallback only):",
     '<tool_call>{"name":"tool_name","arguments":{...}}</tool_call>',
     "",
+    "JSON validity is CRITICAL — a malformed call is dropped:",
+    '- Every string value MUST be valid JSON: escape " as \\", newlines as \\n, backslashes as \\\\, tabs as \\t.',
+    "- Close every brace and quote. The object must be complete and balanced.",
+    "- Output NOTHING after the closing ``` — no markdown, no links, no commentary.",
+    "- When passing file contents (oldString/newString/code), escape them as a single JSON string; do not paste raw multi-line text.",
+    "",
     "Rules:",
     "- Call tools one at a time.",
     "- Include ALL required arguments.",
@@ -392,6 +398,38 @@ export function* parseToolCallsFromText(
     return;
   }
 
+  // Частый брак: объект `arguments` сам по себе валиден и сбалансирован, а
+  // сломана только внешняя обёртка {"name":...} (лишняя кавычка/недостающая `}`
+  // на конце). Вытаскиваем name и balanced-объект arguments напрямую — обёртку
+  // игнорируем.
+  const nameArgsCalls = parseNameArgumentsToolCallsFromText(text);
+  if (nameArgsCalls.calls.length > 0) {
+    logger?.(
+      `${logPrefix}parsed ${nameArgsCalls.calls.length} tool_call(s) from name+arguments syntax`,
+    );
+
+    for (const call of nameArgsCalls.calls) {
+      yield call;
+    }
+
+    return;
+  }
+
+  // Битый JSON (несбалансированные скобки, сырые переводы строк/кавычки,
+  // мусорный хвост) — частый брак маленьких моделей. Чиним best-effort.
+  const repairedCalls = parseRepairedJsonToolCallsFromText(text);
+  if (repairedCalls.calls.length > 0) {
+    logger?.(
+      `${logPrefix}parsed ${repairedCalls.calls.length} tool_call(s) from repaired json syntax`,
+    );
+
+    for (const call of repairedCalls.calls) {
+      yield call;
+    }
+
+    return;
+  }
+
   const prefixedCalls = parsePrefixedToolCallFromText(text);
   if (prefixedCalls.calls.length > 0) {
     logger?.(
@@ -467,8 +505,14 @@ function parseJsonInlineToolCallsFromText(text: string): {
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(text)) !== null) {
     const name = (match[1] ?? "").trim();
-    const args = tryParseJson(match[2] ?? "{}") ?? {};
     if (!name) continue;
+
+    // Только корректно распарсенные аргументы: ленивый `\{[\s\S]*?\}` нередко
+    // захватывает кусок объекта (обрыв на первом `}` внутри значения). Битый
+    // захват не эмитим — пусть его подхватит looseJson / repair-фолбэк, а не
+    // отправляем вызов с пустыми/обрезанными аргументами.
+    const args = tryParseJson(match[2] ?? "");
+    if (!args || typeof args !== "object" || Array.isArray(args)) continue;
 
     calls.push(
       createToolCallChunk({
@@ -514,6 +558,186 @@ function parseLooseJsonToolCallsFromText(text: string): {
   }
 
   return { calls, remainingText };
+}
+
+/**
+ * Извлекает tool_call по отдельности: `name` через regex и сбалансированный
+ * объект `arguments`/`params`/`input` через скобочный экстрактор. Спасает случаи,
+ * когда внешняя обёртка {"name":...} битая (лишняя кавычка, нет закрывающей `}`,
+ * мусорный хвост), но сам объект аргументов — валидный JSON. Если аргументы не
+ * парсятся (например из-за неэкранированных кавычек в значениях) — пропускаем.
+ */
+function parseNameArgumentsToolCallsFromText(text: string): {
+  calls: AIStreamChunk[];
+  remainingText: string;
+} {
+  const calls: AIStreamChunk[] = [];
+  const nameRe = /"name"\s*:\s*"([^"]+)"/g;
+
+  let m: RegExpExecArray | null;
+  while ((m = nameRe.exec(text)) !== null) {
+    const name = (m[1] ?? "").trim();
+    if (!name) continue;
+
+    const argsKeyRe = /"(?:arguments|params|input)"\s*:\s*\{/g;
+    argsKeyRe.lastIndex = m.index + m[0].length;
+    const am = argsKeyRe.exec(text);
+    if (!am) continue;
+
+    const braceStart = am.index + am[0].length - 1;
+    const extracted = extractBalancedJsonAt(text, braceStart);
+    if (!extracted) continue;
+
+    const args = tryParseJson(extracted.json);
+    if (!args || typeof args !== "object" || Array.isArray(args)) continue;
+    if (Object.keys(args as Record<string, unknown>).length === 0) continue;
+
+    calls.push(createToolCallChunk({ name, argumentsValue: args }));
+    nameRe.lastIndex = extracted.end;
+  }
+
+  return { calls, remainingText: text };
+}
+
+/**
+ * Best-effort починка битого JSON tool-call объекта, который часто выдают
+ * маленькие модели (например qwen flash): мусорный хвост после объекта,
+ * недостающие закрывающие скобки/кавычки, сырые переводы строк и
+ * неэкранированные кавычки внутри строковых значений.
+ *
+ * Эвристика по кавычкам: внутри строки `"` считается закрывающей только если
+ * следующий значимый символ структурный (`,` `:` `}` `]`) либо конец; иначе это
+ * неэкранированная кавычка внутри значения — экранируем её. Это не панацея
+ * (контент, сам похожий на JSON, развалит разбор), поэтому результат ОБЯЗАТЕЛЬНО
+ * проверяется через JSON.parse у вызывающего — невалидное чинить не пытаемся.
+ *
+ * Возвращает строку-кандидат для JSON.parse, либо undefined.
+ */
+function repairToolCallJson(text: string, start: number): string | undefined {
+  if (text[start] !== "{") return undefined;
+
+  let out = "";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+
+    if (inString) {
+      if (escaped) {
+        out += ch;
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        out += ch;
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        let j = i + 1;
+        while (j < text.length && /\s/.test(text[j])) j++;
+        const next = text[j];
+        if (
+          next === undefined ||
+          next === "," ||
+          next === ":" ||
+          next === "}" ||
+          next === "]"
+        ) {
+          inString = false;
+          out += ch;
+        } else {
+          out += '\\"';
+        }
+        continue;
+      }
+      if (ch === "\n") {
+        out += "\\n";
+        continue;
+      }
+      if (ch === "\r") {
+        out += "\\r";
+        continue;
+      }
+      if (ch === "\t") {
+        out += "\\t";
+        continue;
+      }
+      out += ch;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      continue;
+    }
+    if (ch === "{") {
+      depth++;
+      out += ch;
+      continue;
+    }
+    if (ch === "}") {
+      depth--;
+      out += ch;
+      if (depth === 0) {
+        // Объект закрылся — мусорный хвост после него отбрасываем.
+        return out;
+      }
+      continue;
+    }
+    out += ch;
+  }
+
+  // Дошли до конца без баланса: авто-закрываем строку и недостающие скобки.
+  if (inString) {
+    out += '"';
+  }
+  while (depth > 0) {
+    out += "}";
+    depth--;
+  }
+
+  return out;
+}
+
+function parseRepairedJsonToolCallsFromText(text: string): {
+  calls: AIStreamChunk[];
+  remainingText: string;
+} {
+  const calls: AIStreamChunk[] = [];
+  const startPattern = /\{\s*"name"\s*:/g;
+
+  let match: RegExpExecArray | null;
+  while ((match = startPattern.exec(text)) !== null) {
+    const repaired = repairToolCallJson(text, match.index);
+    if (!repaired) continue;
+
+    const parsed = tryParseJson(repaired);
+    if (!parsed) continue;
+
+    const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
+    if (!name) continue;
+
+    const argsRaw = parsed.arguments ?? parsed.params ?? parsed.input;
+    // Требуем непустой объект аргументов: пустой/битый вызов не эмитим, чтобы не
+    // слать заведомо нерабочий (а то и разрушительный) tool_call.
+    if (
+      !argsRaw ||
+      typeof argsRaw !== "object" ||
+      Array.isArray(argsRaw) ||
+      Object.keys(argsRaw as Record<string, unknown>).length === 0
+    ) {
+      continue;
+    }
+
+    calls.push(createToolCallChunk({ name, argumentsValue: argsRaw }));
+    startPattern.lastIndex = match.index + repaired.length;
+  }
+
+  return { calls, remainingText: text };
 }
 
 function parsePrefixedToolCallFromText(text: string): {

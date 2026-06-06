@@ -197,6 +197,10 @@ export class DeepSeekApiClient {
     let lastActivityAt = Date.now();
     const fragments = new Map<string, string>();
     let parsedEventsCount = 0;
+    // Последний message_id ответа — нужен, чтобы корректно остановить генерацию
+    // на сервере (stop_stream) при обрыве, иначе следующий запрос в тот же диалог
+    // упирается в "message still wip".
+    let currentMessageId: number | undefined;
     let emittedTextChunks = 0;
     let emittedThinkingChunks = 0;
     const router = new StreamingToolCallRouter(
@@ -302,6 +306,7 @@ export class DeepSeekApiClient {
             patchState,
           );
           if (typeof messageId === "number") {
+            currentMessageId = messageId;
             options?.onMessageId?.(messageId);
           }
           if (thinking) {
@@ -313,6 +318,25 @@ export class DeepSeekApiClient {
           }
 
           boundary = findEventBoundary(buffer);
+        }
+
+        // Транскрипт-страж в роутере распознал фейковый следующий ход — апстрим
+        // дальше только «доигрывает» диалог. Останавливаем генерацию на сервере
+        // через stop_stream (просто cancel оставляет сообщение "wip" — следующий
+        // запрос в тот же диалог падает с biz error 11), затем рвём чтение.
+        if (router.cut) {
+          log("[deepseek-api] transcript boundary detected — stopping stream");
+          try {
+            await this.stopStream(auth, sessionId, currentMessageId);
+          } catch (stopErr) {
+            log(`[deepseek-api] stop_stream failed: ${String(stopErr)}`);
+          }
+          try {
+            await reader.cancel();
+          } catch {
+            // ignore
+          }
+          break;
         }
       }
 

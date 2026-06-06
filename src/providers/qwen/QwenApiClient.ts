@@ -816,8 +816,9 @@ export class QwenApiClient {
           }
           fullText += contentText;
 
-          // Текстовый канал маршрутизируем через общий роутер (ловит/придерживает
-          // ```tool_call``` маркеры). Нативные tool_calls обрабатываются отдельно ниже.
+          // Текстовый канал маршрутизируем через общий роутер: он же содержит
+          // транскрипт-страж (обрезает фейковый следующий ход) и ловит/придерживает
+          // ```tool_call``` маркеры. Нативные tool_calls обрабатываются ниже.
           for (const chunk of router.route(contentText)) {
             if (chunk.type === "text") {
               streamedTextChars += chunk.content.length;
@@ -913,6 +914,19 @@ export class QwenApiClient {
         yield* processLine(line);
       }
 
+      if (router.cut) {
+        stoppedByGuard = true;
+        log(
+          "[qwen-api] transcript boundary detected (fabricated User/Tool-result turn) — stopping stream",
+        );
+        try {
+          await reader.cancel();
+        } catch {
+          // ignore
+        }
+        break;
+      }
+
       if (
         allowToolCalls &&
         nativeToolCalls.length === 0 &&
@@ -980,8 +994,9 @@ export class QwenApiClient {
 
     // Гарантированный фолбэк: если пользователю не отдали ничего (ни текста,
     // ни tool call), но модель что-то сгенерировала — отдаём накопленный текст,
-    // чтобы исключить пустой ответ.
-    if (!emittedAnything && fullText.trim()) {
+    // чтобы исключить пустой ответ. НО не после обрыва на фейковой границе:
+    // там fullText содержит галлюцинированный транскрипт, который мы и срезали.
+    if (!emittedAnything && !router.cut && fullText.trim()) {
       yield { type: "text", content: fullText };
     }
 
