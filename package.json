@@ -1,9 +1,9 @@
 {
-  "name": "ai-free-vscode",
+  "name": "free-ai-vscode",
   "displayName": "AI Free VSCode for Copilot Chat",
   "description": "Use free AI models directly in Copilot Chat",
-  "version": "0.4.2",
-  "publisher": "ai-free-vscode",
+  "version": "0.5.0",
+  "publisher": "AppsGanin",
   "license": "MIT",
   "private": false,
   "repository": {
@@ -28,42 +28,42 @@
   "contributes": {
     "languageModelChatProviders": [
       {
-        "vendor": "ai-free-vscode",
+        "vendor": "free-ai-vscode",
         "displayName": "AI Free VSCode"
       }
     ],
     "commands": [
       {
-        "command": "ai-free-vscode.login",
+        "command": "free-ai-vscode.login",
         "title": "AI Free VSCode — Sign In"
       },
       {
-        "command": "ai-free-vscode.logout",
+        "command": "free-ai-vscode.logout",
         "title": "AI Free VSCode — Sign Out"
       },
       {
-        "command": "ai-free-vscode.status",
+        "command": "free-ai-vscode.status",
         "title": "AI Free VSCode — Status"
       },
       {
-        "command": "ai-free-vscode.manage",
+        "command": "free-ai-vscode.manage",
         "title": "AI Free VSCode — Manage Account"
       },
       {
-        "command": "ai-free-vscode.generateCommitMessage",
+        "command": "free-ai-vscode.generateCommitMessage",
         "title": "AI Free VSCode — Generate Commit Message",
         "icon": "$(sparkle)"
       },
       {
-        "command": "ai-free-vscode.selectCommitModel",
+        "command": "free-ai-vscode.selectCommitModel",
         "title": "AI Free VSCode — Select Commit Model"
       },
       {
-        "command": "ai-free-vscode.triggerInlineSuggestion",
+        "command": "free-ai-vscode.triggerInlineSuggestion",
         "title": "AI Free VSCode — Inline Suggestion (Ghost Text)"
       },
       {
-        "command": "ai-free-vscode.fixProblem",
+        "command": "free-ai-vscode.fixProblem",
         "title": "AI Free VSCode — Fix Problem (Error/Warning)",
         "icon": "$(sparkle)"
       }
@@ -71,7 +71,7 @@
     "menus": {
       "scm/title": [
         {
-          "command": "ai-free-vscode.generateCommitMessage",
+          "command": "free-ai-vscode.generateCommitMessage",
           "when": "scmProvider == git",
           "group": "navigation"
         }
@@ -137,7 +137,7 @@
     },
     "keybindings": [
       {
-        "command": "ai-free-vscode.triggerInlineSuggestion",
+        "command": "free-ai-vscode.triggerInlineSuggestion",
         "key": "ctrl+alt+\\",
         "mac": "cmd+alt+\\",
         "when": "editorTextFocus && !editorReadonly"

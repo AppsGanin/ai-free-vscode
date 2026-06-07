@@ -5,6 +5,8 @@
 [![GitHub watchers](https://img.shields.io/github/watchers/AppsGanin/ai-free-vscode.svg?style=social)](https://github.com/AppsGanin/ai-free-vscode/watchers)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![VS Code](https://img.shields.io/badge/VS_Code-%5E1.105.0-success.svg)](https://code.visualstudio.com)
+[![VS Marketplace Version](https://img.shields.io/visual-studio-marketplace/v/AppsGanin.free-ai-vscode?label=Marketplace&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=AppsGanin.free-ai-vscode)
+[![VS Marketplace Installs](https://img.shields.io/visual-studio-marketplace/i/AppsGanin.free-ai-vscode)](https://marketplace.visualstudio.com/items?itemName=AppsGanin.free-ai-vscode)
 
 > Use free AI models directly in Copilot Chat without API keys, billing, or token counting.
 
@@ -97,7 +99,20 @@ dead entries that fail on use.
 
 ## Installation
 
-1. Download the latest `ai-free-vscode-*.vsix` from the Releases page.
+### From the VS Code Marketplace (recommended)
+
+[![Visual Studio Marketplace](https://img.shields.io/visual-studio-marketplace/v/AppsGanin.free-ai-vscode?label=VS%20Marketplace&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=AppsGanin.free-ai-vscode)
+
+- In VS Code, open the **Extensions** view (`Cmd+Shift+X` / `Ctrl+Shift+X`), search for **AI Free VSCode**, and click **Install**.
+- Or from the command line:
+  ```bash
+  code --install-extension AppsGanin.free-ai-vscode
+  ```
+- Or open it directly on the [Marketplace page](https://marketplace.visualstudio.com/items?itemName=AppsGanin.free-ai-vscode).
+
+### From a VSIX (manual)
+
+1. Download the latest `free-ai-vscode-*.vsix` from the [Releases](https://github.com/AppsGanin/ai-free-vscode/releases) page.
 2. In VS Code, open Extensions → `···` → **Install from VSIX...**.
 3. Reload VS Code.
 
@@ -210,7 +225,6 @@ Run the extension in VS Code with `F5`.
 
 - VS Code `^1.105.0`
 - System Chrome or network access for Playwright to download Chromium
-- Free Qwen or DeepSeek account for browser sign-in
 
 ## Important notice
 

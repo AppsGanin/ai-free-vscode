@@ -3,7 +3,7 @@ import { BaseAIProvider } from "./BaseAIProvider";
 import type { AIModelInfo, AIRequestParams, AIStreamChunk } from "./types";
 
 export class UnifiedProvider extends BaseAIProvider {
-  readonly id = "ai-free-vscode";
+  readonly id = "free-ai-vscode";
   readonly displayName = "AI Free VSCode";
 
   private readonly modelToProvider = new Map<string, BaseAIProvider>();

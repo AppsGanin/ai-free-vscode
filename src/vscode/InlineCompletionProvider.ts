@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { log } from "../logger";
 
-const VENDOR = "ai-free-vscode";
+const VENDOR = "free-ai-vscode";
 
 const SYSTEM_PROMPT = [
   "You are an inline code completion engine inside an IDE.",

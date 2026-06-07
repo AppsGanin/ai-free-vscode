@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { log } from "../logger";
 
-const VENDOR = "ai-free-vscode";
+const VENDOR = "free-ai-vscode";
 const MAX_DIFF_CHARS = 16000;
 
 const DEFAULT_PROMPT = [

@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { log } from "../logger";
 
-const VENDOR = "ai-free-vscode";
+const VENDOR = "free-ai-vscode";
 const FIX_COMMAND = `${VENDOR}.fixProblem`;
 const CONTEXT_LINES = 30;
 const PREVIEW_SCHEME = "ai-free-fix-preview";
