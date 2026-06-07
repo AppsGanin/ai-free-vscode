@@ -6,3 +6,5 @@ node_modules/.cache
 .idea
 .vscode
 ~/.ai-free-vscode
+media/*.mp4
+*.mp4

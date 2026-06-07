@@ -24,6 +24,23 @@
 Only models from providers you are signed into appear in the picker — no
 dead entries that fail on use.
 
+## Demo
+
+### Chat
+
+<video src="media/chat.mp4" controls width="100%"></video>
+
+### Generate commit messages
+
+<video src="media/generate-commits.mp4" controls width="100%"></video>
+
+### Fix with AI
+
+<video src="media/fix.mp4" controls width="100%"></video>
+
+> If the players don't load inline, the clips are here:
+> [chat](media/chat.mp4) · [generate-commits](media/generate-commits.mp4) · [fix](media/fix.mp4).
+
 ## Supported models
 
 ### Qwen

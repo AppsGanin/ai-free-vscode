@@ -6,3 +6,4 @@ auth.json
 .idea/
 .dist/
 dist/
+.DS_Store
