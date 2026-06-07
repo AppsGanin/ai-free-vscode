@@ -5,8 +5,9 @@
 [![GitHub watchers](https://img.shields.io/github/watchers/AppsGanin/ai-free-vscode.svg?style=social)](https://github.com/AppsGanin/ai-free-vscode/watchers)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![VS Code](https://img.shields.io/badge/VS_Code-%5E1.105.0-success.svg)](https://code.visualstudio.com)
-[![VS Marketplace Version](https://img.shields.io/visual-studio-marketplace/v/AppsGanin.free-ai-vscode?label=Marketplace&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=AppsGanin.free-ai-vscode)
-[![VS Marketplace Installs](https://img.shields.io/visual-studio-marketplace/i/AppsGanin.free-ai-vscode)](https://marketplace.visualstudio.com/items?itemName=AppsGanin.free-ai-vscode)
+[![VS Marketplace Version](https://vsmarketplacebadges.dev/version-short/AppsGanin.free-ai-vscode.png)](https://marketplace.visualstudio.com/items?itemName=AppsGanin.free-ai-vscode)
+[![VS Marketplace Installs](https://vsmarketplacebadges.dev/installs-short/AppsGanin.free-ai-vscode.png)](https://marketplace.visualstudio.com/items?itemName=AppsGanin.free-ai-vscode)
+[![VS Marketplace Rating](https://vsmarketplacebadges.dev/rating-short/AppsGanin.free-ai-vscode.png)](https://marketplace.visualstudio.com/items?itemName=AppsGanin.free-ai-vscode)
 
 > Use free AI models directly in Copilot Chat without API keys, billing, or token counting.
 
@@ -101,7 +102,7 @@ dead entries that fail on use.
 
 ### From the VS Code Marketplace (recommended)
 
-[![Visual Studio Marketplace](https://img.shields.io/visual-studio-marketplace/v/AppsGanin.free-ai-vscode?label=VS%20Marketplace&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=AppsGanin.free-ai-vscode)
+[![Visual Studio Marketplace](https://vsmarketplacebadges.dev/version/AppsGanin.free-ai-vscode.png)](https://marketplace.visualstudio.com/items?itemName=AppsGanin.free-ai-vscode)
 
 - In VS Code, open the **Extensions** view (`Cmd+Shift+X` / `Ctrl+Shift+X`), search for **AI Free VSCode**, and click **Install**.
 - Or from the command line:
