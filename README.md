@@ -44,6 +44,7 @@ dead entries that fail on use.
 
 | Model                  | ID                                   | Context |
 | ---------------------- | ------------------------------------ | ------- |
+| Qwen3.7 Plus           | `qwen3.7-plus`                       | 1M      |
 | Qwen3.7 Max            | `qwen3.7-max`                        | 1M      |
 | Qwen3.7 Max (Preview)  | `qwen-latest-series-invite-beta-v24` | 256K    |
 | Qwen3.7 Plus (Preview) | `qwen-latest-series-invite-beta-v16` | 1M      |
@@ -59,12 +60,13 @@ dead entries that fail on use.
 | Qwen3.5 122B-A10B      | `qwen3.5-122b-a10b`                  | 256K    |
 | Qwen3.5 35B-A3B        | `qwen3.5-35b-a3b`                    | 256K    |
 | Qwen3.5 27B            | `qwen3.5-27b`                        | 256K    |
+| Qwen3.5 Omni Plus      | `qwen3.5-omni-plus`                  | 256K    |
+| Qwen3.5 Omni Flash     | `qwen3.5-omni-flash`                 | 256K    |
 | Qwen3 Max              | `qwen3-max-2026-01-23`               | 256K    |
 | Qwen3 235B-A22B        | `qwen-plus-2025-07-28`               | 128K    |
 | Qwen3 Coder            | `qwen3-coder-plus`                   | 1M      |
-| Qwen3 VL 235B-A22B     | `qwen3-vl-plus`                      | 262K    |
+| Qwen3 VL 235B-A22B     | `qwen3-vl-plus`                      | 256K    |
 | Qwen3 Omni Flash       | `qwen3-omni-flash-2025-12-01`        | 65K     |
-| Qwen2.5 Max            | `qwen-max-latest`                    | 128K    |
 
 ### DeepSeek
 
