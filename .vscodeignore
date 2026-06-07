@@ -6,5 +6,5 @@ node_modules/.cache
 .idea
 .vscode
 ~/.ai-free-vscode
-media/*.mp4
-*.mp4
+# Демо-гифки — нужны только для README на GitHub, не для пакета расширения
+media/*.gif
