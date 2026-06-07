@@ -5,6 +5,19 @@ import type { AIModelInfo } from "../types";
 export const QWEN_MODELS: AIModelInfo[] = [
   // ─── Qwen 3.7 ────────────────────────────────────────────────────────────
   {
+    id: "qwen3.7-plus",
+    name: "Qwen3.7 Plus",
+    family: "Qwen3.7",
+    maxInputTokens: 1000000,
+    maxOutputTokens: 65536,
+    capabilities: {
+      toolCalling: true,
+      streaming: true,
+      imageInput: true,
+      thinking: true,
+    },
+  },
+  {
     id: "qwen3.7-max",
     name: "Qwen3.7 Max",
     family: "Qwen3.7",
@@ -268,20 +281,6 @@ export const QWEN_MODELS: AIModelInfo[] = [
       thinking: false,
     },
   },
-  // ─── Qwen 2.5 ────────────────────────────────────────────────────────────
-  {
-    id: "qwen-max-latest",
-    name: "Qwen2.5 Max",
-    family: "Qwen2.5",
-    maxInputTokens: 131072,
-    maxOutputTokens: 8192,
-    capabilities: {
-      toolCalling: true,
-      streaming: true,
-      imageInput: true,
-      thinking: true,
-    },
-  },
 ];
 
 /** Алиасы: короткое имя → канонический ID */
@@ -306,9 +305,6 @@ export const QWEN_MODEL_ALIASES: Record<string, string> = {
   "qwen3-coder": "qwen3-coder-plus",
   "qwen3-vl": "qwen3-vl-plus",
   "qwen3-omni": "qwen3-omni-flash-2025-12-01",
-  // Qwen 2.5
-  "qwen-max": "qwen-max-latest",
-  "qwen2.5-max": "qwen-max-latest",
   // Generic
   "qwen-plus": "qwen3.6-plus",
 };
