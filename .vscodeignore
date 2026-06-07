@@ -1,10 +1,23 @@
 # Файлы, исключаемые при упаковке расширения
 .git
 .gitignore
+.gitattributes
 *.log
 node_modules/.cache
 .idea
 .vscode
+.github
+.husky
 ~/.ai-free-vscode
+.DS_Store
+**/.DS_Store
+
+# Исходники и конфиги сборки — в пакете нужен только собранный dist/extension.js
+src/**
+esbuild.js
+tsconfig.json
+**/*.map
+*.vsix
+
 # Демо-гифки — нужны только для README на GitHub, не для пакета расширения
 media/*.gif
