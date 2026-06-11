@@ -272,7 +272,7 @@ export class QwenApiClient {
         log(
           "[qwen-api] network terminated during stream (TLS drop), retrying with new chat_id",
         );
-        const newChatId = await this.createChat(normalizedToken, params.model);
+        const newChatId = await this.createChat(normalizedToken, apiModelType);
         if (!newChatId) {
           throw new ProviderError(
             PROVIDER_ID,
@@ -294,7 +294,7 @@ export class QwenApiClient {
 
         const freshChatId = await this.createChat(
           normalizedToken,
-          params.model,
+          apiModelType,
         );
         if (!freshChatId) {
           throw new ProviderError(
@@ -411,18 +411,28 @@ export class QwenApiClient {
       }),
     });
 
+    const bodyText = await response.text().catch(() => "");
+
     if (!response.ok) {
-      const bodyText = await response.text().catch(() => "");
       log(
-        `[qwen-api] createChat failed status=${response.status} body=${bodyText.slice(0, 200)}`,
+        `[qwen-api] createChat failed status=${response.status} body=${bodyText.slice(0, 300)}`,
       );
       return undefined;
     }
 
-    const data = (await response.json().catch(() => ({}))) as {
-      data?: { id?: string };
-    };
-    return data?.data?.id;
+    let data: { data?: { id?: string; chat_id?: string }; id?: string } = {};
+    try {
+      data = JSON.parse(bodyText);
+    } catch {
+      log(`[qwen-api] createChat ok but response is not JSON: ${bodyText.slice(0, 200)}`);
+      return undefined;
+    }
+
+    const chatId = data?.data?.id ?? data?.data?.chat_id ?? data?.id;
+    if (!chatId) {
+      log(`[qwen-api] createChat ok but no id in response: ${bodyText.slice(0, 300)}`);
+    }
+    return chatId;
   }
 
   private async stopStream(token: string, chatId: string): Promise<void> {

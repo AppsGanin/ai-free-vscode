@@ -123,7 +123,7 @@ async function selectCommitModel(): Promise<void> {
   const models = await vscode.lm.selectChatModels({ vendor: VENDOR });
   if (models.length === 0) {
     const action = await vscode.window.showWarningMessage(
-      "No models available. Sign in to Qwen or DeepSeek.",
+      "No models available. Sign in to Qwen, DeepSeek or Kimi.",
       "Sign In",
     );
     if (action === "Sign In") {
@@ -218,7 +218,7 @@ async function generateCommitMessage(scmArg?: unknown): Promise<void> {
   const model = await pickConfiguredModel();
   if (!model) {
     const action = await vscode.window.showWarningMessage(
-      "No models available. Sign in to Qwen or DeepSeek.",
+      "No models available. Sign in to Qwen, DeepSeek or Kimi.",
       "Sign In",
     );
     if (action === "Sign In") {

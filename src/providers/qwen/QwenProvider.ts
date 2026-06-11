@@ -5,7 +5,7 @@ import type { AIModelInfo, AIRequestParams, AIStreamChunk } from "../types";
 import { AuthExpiredError } from "../types";
 import { QwenApiClient } from "./QwenApiClient";
 import { QwenAuthManager } from "./QwenAuthManager";
-import { QWEN_MODELS } from "./QwenModels";
+import { QWEN_MODELS, resolveModelId, toQwenApiModelType } from "./QwenModels";
 
 export class QwenProvider extends BaseAIProvider {
   readonly id = "ai-free-vscode";
@@ -50,7 +50,8 @@ export class QwenProvider extends BaseAIProvider {
       params.chatId ?? this.chatIdByConversation.get(conversationKey);
 
     if (!chatId) {
-      chatId = await this.apiClient.createChat(token, params.model);
+      const apiModelType = toQwenApiModelType(resolveModelId(params.model));
+      chatId = await this.apiClient.createChat(token, apiModelType);
       if (!chatId) {
         throw new Error("Failed to create chat_id for Qwen");
       }
