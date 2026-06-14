@@ -1,8 +1,10 @@
 import * as vscode from "vscode";
 import { log, setOutputChannel } from "./logger";
+import { BaseAIProvider } from "./providers/BaseAIProvider";
 import { UnifiedProvider } from "./providers/UnifiedProvider";
 import { DeepSeekProvider } from "./providers/deepseek/DeepSeekProvider";
 import { KimiProvider } from "./providers/kimi/KimiProvider";
+import { ProviderKey, enabledProviders } from "./providers/providerConfig";
 import { QwenProvider } from "./providers/qwen/QwenProvider";
 import { AuthExpiredError, RateLimitError } from "./providers/types";
 import { registerCommitMessageCommands } from "./vscode/CommitMessageGenerator";
@@ -20,15 +22,27 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(registry);
 
   // ─── Регистрируем провайдеры ─────────────────────────────────────────────
+  // Какие провайдеры попадают в сборку, решается на этапе сборки
+  // (PROVIDER_<NAME>=false, см. esbuild.js + providerConfig.ts).
+  // Чтобы добавить нового провайдера — допишите ключ сюда и в ALL_PROVIDERS.
+  const providerFactories: Record<ProviderKey, () => BaseAIProvider> = {
+    qwen: () => new QwenProvider(),
+    deepseek: () => new DeepSeekProvider(),
+    kimi: () => new KimiProvider(),
+  };
+
+  const subProviders = enabledProviders().map((key) =>
+    providerFactories[key](),
+  );
+
+  log(
+    `[extension] enabled providers: ${
+      subProviders.map((p) => p.id).join(", ") || "(none)"
+    }`,
+  );
+
   // Единый провайдер для общего списка моделей в VS Code model picker.
-  const qwenProvider = new QwenProvider();
-  const deepSeekProvider = new DeepSeekProvider();
-  const kimiProvider = new KimiProvider();
-  const unifiedProvider = new UnifiedProvider([
-    qwenProvider,
-    deepSeekProvider,
-    kimiProvider,
-  ]);
+  const unifiedProvider = new UnifiedProvider(subProviders);
   registry.register(unifiedProvider);
 
   // ─── Слушаем ошибки авторизации от провайдеров ────────────────────────────

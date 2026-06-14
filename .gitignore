@@ -6,4 +6,5 @@ auth.json
 .idea/
 .dist/
 dist/
+*.vsix
 .DS_Store

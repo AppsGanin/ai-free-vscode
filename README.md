@@ -15,7 +15,7 @@
 
 ## What it does
 
-- ✅ Integrates free Qwen, DeepSeek, and Kimi models into Copilot Chat
+- ✅ Integrates free web-based AI models into Copilot Chat
 - ✅ Requires no API keys and does not use paid OpenAI endpoints
 - ✅ Authenticates via a real browser session
 - ✅ Supports streaming, automatic thinking mode, and tool calling
@@ -94,7 +94,7 @@ dead entries that fail on use.
 
 1. The extension registers a single Copilot Chat provider: `ai-free-vscode`.
 2. Signing in launches Playwright and stores the authenticated session in `SecretStorage`.
-3. Requests are routed through private Qwen, DeepSeek, and Kimi API streams.
+3. Requests are routed through the providers' private API streams (see [Supported models](#supported-models)).
 4. Responses are delivered to VS Code as streamed chunks.
 5. The extension handles tool calling and thinking-mode when available.
 
@@ -122,7 +122,7 @@ dead entries that fail on use.
 1. Open Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`).
 2. Run the sign-in command:
    - `AI Free VSCode — Sign In`
-3. Choose a provider: Qwen, DeepSeek, Kimi.
+3. Choose a provider from the list (see [Supported models](#supported-models)).
 4. Sign in with your browser and wait for success.
 5. Open Copilot Chat and select a model.
 
@@ -203,6 +203,28 @@ npx playwright install chromium
 
 Run the extension in VS Code with `F5`.
 
+### Enabling/disabling providers at build time
+
+Each provider can be excluded from a build via a `PROVIDER_<NAME>=false`
+environment variable (accepted falsy values: `false`, `0`, `off`, `no`).
+By default all providers are included. The build prints the active set, e.g.
+`[build] enabled providers: deepseek, kimi`.
+
+```bash
+# Build without Qwen
+PROVIDER_QWEN=false npm run bundle
+
+# Build with only DeepSeek (drop Qwen and Kimi)
+PROVIDER_QWEN=false PROVIDER_KIMI=false npm run bundle
+
+# Package a VSIX without Qwen
+PROVIDER_QWEN=false npm run bundle && npm run package
+```
+
+Provider keys: `qwen`, `deepseek`, `kimi`. Adding a new provider means
+registering its key in [`src/providers/providerConfig.ts`](src/providers/providerConfig.ts),
+[`esbuild.js`](esbuild.js), and the factory map in [`src/extension.ts`](src/extension.ts).
+
 ## Project structure
 
 - `src/extension.ts` — extension activation, command registration, provider wiring
@@ -210,9 +232,9 @@ Run the extension in VS Code with `F5`.
 - `src/providers/BaseAIProvider.ts` — abstract provider interface for all models
 - `src/providers/types.ts` — shared AI request/response type definitions
 - `src/providers/common/` — shared provider utilities (model resolver, Chromium guard, tool calling helpers)
-- `src/providers/UnifiedProvider.ts` — unified provider combining Qwen + DeepSeek
-- `src/providers/qwen/` — Qwen client, auth manager, and model definitions
-- `src/providers/deepseek/` — DeepSeek client, auth manager, and model definitions
+- `src/providers/UnifiedProvider.ts` — unified provider combining all enabled providers
+- `src/providers/providerConfig.ts` — registry of providers and their build-time on/off state
+- `src/providers/<name>/` — each provider's client, auth manager, and model definitions
 - `src/vscode/ProviderRegistry.ts` — registers the provider with VS Code LM API
 - `src/vscode/VSCodeLMAdapter.ts` — adapter between VS Code LM API and providers
 - `src/vscode/CommitMessageGenerator.ts` — commit message generation command
