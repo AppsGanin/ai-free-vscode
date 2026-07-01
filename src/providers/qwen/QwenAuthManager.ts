@@ -1,25 +1,11 @@
 import { rm } from "fs/promises";
-import * as os from "os";
-import * as path from "path";
-import { chromium } from "playwright";
 import * as vscode from "vscode";
 import { createLogger, errToString } from "../../logger";
+import { BROWSER_DATA_DIR, launchQwenContext } from "./QwenBrowser";
 
 const TOKEN_SECRET_KEY = "ai-free-vscode.token";
 const LEGACY_TOKEN_SECRET_KEYS = ["qwen-free.token"];
 const QWEN_AUTH_URL = "https://chat.qwen.ai/auth?action=signin";
-const QWEN_HOME_URL = "https://chat.qwen.ai";
-
-/**
- * Постоянная директория профиля браузера.
- * Использует реальный Chrome, чтобы обойти блокировку Google OAuth
- * для автоматизированных браузеров.
- */
-const BROWSER_DATA_DIR = path.join(
-  os.homedir(),
-  ".ai-free-vscode",
-  "browser-profile",
-);
 
 const qlog = createLogger("qwen-auth");
 
@@ -38,7 +24,7 @@ export class QwenAuthManager {
     // Это позволяет Google OAuth работать, так как Chrome не помечается как автоматизированный.
     // Fallback: если Chrome не установлен — используем встроенный Chromium.
     qlog.info("login: opening browser");
-    const browserContext = await this.launchContext(timeoutMs);
+    const browserContext = await launchQwenContext({ headless: false });
 
     const page = await browserContext.newPage();
 
@@ -118,39 +104,6 @@ export class QwenAuthManager {
   }
 
   /**
-   * Запускает браузер с постоянным профилем.
-   * Сначала пробует реальный Chrome (channel: 'chrome'), при ошибке — встроенный Chromium.
-   */
-  private async launchContext(
-    _timeoutMs: number,
-  ): Promise<import("playwright").BrowserContext> {
-    const launchOptions = {
-      headless: false,
-      viewport: { width: 1280, height: 800 },
-      args: [
-        "--no-sandbox",
-        "--disable-blink-features=AutomationControlled",
-        "--disable-infobars",
-      ],
-    };
-
-    // Пробуем системный Chrome — он не блокируется Google OAuth
-    try {
-      return await chromium.launchPersistentContext(BROWSER_DATA_DIR, {
-        ...launchOptions,
-        channel: "chrome",
-      });
-    } catch {
-      // Chrome не установлен или не найден — падаем на встроенный Chromium
-      // В этом случае Google OAuth может потребовать дополнительной верификации
-      return await chromium.launchPersistentContext(
-        BROWSER_DATA_DIR,
-        launchOptions,
-      );
-    }
-  }
-
-  /**
    * Удаляет сохранённый токен.
    */
   async logout(secrets: vscode.SecretStorage): Promise<void> {
@@ -183,6 +136,22 @@ export class QwenAuthManager {
    */
   async getToken(secrets: vscode.SecretStorage): Promise<string | undefined> {
     return this.normalizeToken(await secrets.get(TOKEN_SECRET_KEY));
+  }
+
+  /**
+   * Нормализует и сохраняет токен (например, обновлённый из живой браузерной
+   * сессии). Возвращает сохранённое значение или undefined, если он пустой.
+   */
+  async saveToken(
+    secrets: vscode.SecretStorage,
+    raw: string | undefined,
+  ): Promise<string | undefined> {
+    const token = this.normalizeToken(raw);
+    if (!token) {
+      return undefined;
+    }
+    await secrets.store(TOKEN_SECRET_KEY, token);
+    return token;
   }
 
   // ─── Private helpers ────────────────────────────────────────────────────

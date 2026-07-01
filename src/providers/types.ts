@@ -133,6 +133,20 @@ export class ProviderError extends Error {
   }
 }
 
+/**
+ * Aliyun WAF завернул прямой серверный запрос: вернулся HTML-челлендж
+ * (обычно со статусом 200) вместо SSE-потока. Сигнал перейти на браузерный путь.
+ */
+export class WafChallengeError extends Error {
+  constructor(
+    public readonly providerId: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "WafChallengeError";
+  }
+}
+
 // ─── VS Code message conversion helpers ───────────────────────────────────────
 
 /**

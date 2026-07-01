@@ -5,6 +5,7 @@ import type { AIModelInfo, AIRequestParams, AIStreamChunk } from "../types";
 import { AuthExpiredError } from "../types";
 import { QwenApiClient } from "./QwenApiClient";
 import { QwenAuthManager } from "./QwenAuthManager";
+import { QwenBrowserBridge } from "./QwenBrowserBridge";
 import { QWEN_MODELS, resolveModelId, toQwenApiModelType } from "./QwenModels";
 
 export class QwenProvider extends BaseAIProvider {
@@ -12,7 +13,15 @@ export class QwenProvider extends BaseAIProvider {
   readonly displayName = "Qwen (Free)";
 
   private readonly authManager = new QwenAuthManager();
-  private readonly apiClient = new QwenApiClient();
+  private readonly browser = new QwenBrowserBridge(
+    (message) => {
+      void vscode.window.showWarningMessage(message);
+    },
+    vscode.workspace
+      .getConfiguration("freeAI")
+      .get<"auto" | "headed" | "headless">("qwen.browserMode", "auto"),
+  );
+  private readonly apiClient = new QwenApiClient(this.browser);
   private readonly chatIdByConversation = new Map<string, string>();
 
   // ─── BaseAIProvider implementation ───────────────────────────────────────
@@ -26,11 +35,15 @@ export class QwenProvider extends BaseAIProvider {
   }
 
   async login(secrets: vscode.SecretStorage): Promise<void> {
+    // Persistent-профиль нельзя открыть двумя контекстами сразу: гасим мост
+    // перед интерактивным входом.
+    await this.browser.close();
     await this.authManager.login(secrets);
     this._onDidAuthChange.fire();
   }
 
   async logout(secrets: vscode.SecretStorage): Promise<void> {
+    await this.browser.close();
     await this.authManager.logout(secrets);
     this.chatIdByConversation.clear();
     this._onDidAuthChange.fire();
@@ -70,12 +83,52 @@ export class QwenProvider extends BaseAIProvider {
         token,
       );
     } catch (err) {
-      if (err instanceof AuthExpiredError) {
-        // Токен протух — уведомляем и пробрасываем выше
-        this._onDidAuthChange.fire();
+      if (!(err instanceof AuthExpiredError)) {
+        throw err;
       }
+
+      // Токен протух. Живая браузерная сессия (cookies в профиле) может быть ещё
+      // валидна — пробуем достать свежий Bearer из localStorage и повторить один раз.
+      const refreshed = await this.tryRefreshToken(secrets, token);
+      if (refreshed) {
+        log(`[${this.id}] token refreshed from live session, retrying request`);
+        try {
+          yield* this.apiClient.sendMessageStream(
+            { ...params, chatId },
+            refreshed,
+          );
+          return;
+        } catch (retryErr) {
+          if (retryErr instanceof AuthExpiredError) {
+            this._onDidAuthChange.fire();
+          }
+          throw retryErr;
+        }
+      }
+
+      // Обновить не удалось — уведомляем и пробрасываем выше.
+      this._onDidAuthChange.fire();
       throw err;
     }
+  }
+
+  /**
+   * Пытается получить свежий токен из живой браузерной сессии и сохранить его.
+   * Возвращает новый токен, только если он отличается от текущего.
+   */
+  private async tryRefreshToken(
+    secrets: vscode.SecretStorage,
+    current: string,
+  ): Promise<string | undefined> {
+    const raw = await this.browser.readToken().catch(() => undefined);
+    if (!raw) {
+      return undefined;
+    }
+    const stored = await this.authManager.saveToken(secrets, raw);
+    if (!stored || stored === current) {
+      return undefined;
+    }
+    return stored;
   }
 
   private buildConversationKey(params: AIRequestParams): string {

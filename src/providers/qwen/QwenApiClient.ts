@@ -7,13 +7,40 @@ import {
   selectToolsForPrompt,
 } from "../common/ToolCalling";
 import type { AIMessage, AIRequestParams, AIStreamChunk } from "../types";
-import { AuthExpiredError, ProviderError, RateLimitError } from "../types";
+import {
+  AuthExpiredError,
+  ProviderError,
+  RateLimitError,
+  WafChallengeError,
+} from "../types";
+import type { QwenBrowserBridge } from "./QwenBrowserBridge";
 import { QWEN_MODELS, resolveModelId, toQwenApiModelType } from "./QwenModels";
 
 const QWEN_CHAT_API_URL = "https://chat.qwen.ai/api/v2/chat/completions";
 const QWEN_CREATE_CHAT_URL = "https://chat.qwen.ai/api/v2/chats/new";
 const QWEN_STOP_CHAT_URL = "https://chat.qwen.ai/api/v2/chat/completions/stop";
 const PROVIDER_ID = "ai-free-vscode";
+
+// Прикладные заголовки, которые шлёт веб-приложение chat.qwen.ai. Судя по трафику,
+// именно они (source/version/x-request-id), а не тяжёлая подпись bx-*, — базовый
+// гейт WAF/бэкенда. Версии могут дрейфовать со временем.
+const QWEN_WEB_VERSION = "0.2.68";
+const QWEN_BX_V = "2.5.36";
+const QWEN_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+function qwenAppHeaders(): Record<string, string> {
+  return {
+    source: "web",
+    version: QWEN_WEB_VERSION,
+    "bx-v": QWEN_BX_V,
+    "x-request-id": crypto.randomUUID(),
+    // Как в приложении: Date().toString() без скобочного имени зоны
+    // (оно может содержать не-latin1 символы и ломает заголовок).
+    timezone: new Date().toString().replace(/\s*\(.*\)\s*$/, ""),
+    "Accept-Language": "en-US,en;q=0.9",
+  };
+}
 
 const MAX_PROMPT_CHARS = 500000;
 const MAX_SYSTEM_MESSAGE_CHARS = 100000;
@@ -117,6 +144,8 @@ function stringifyUnknown(value: unknown, maxLen = 600): string {
 }
 
 export class QwenApiClient {
+  constructor(private readonly browser?: QwenBrowserBridge) {}
+
   async *sendMessageStream(
     params: AIRequestParams,
     token: string,
@@ -199,7 +228,10 @@ export class QwenApiClient {
         body: currentBody,
         abortSignal: params.abortSignal,
       });
-      yield* this.parseSSEText(response, allowToolCalls);
+      yield* this.parseSSEText(
+        this.readResponseBody(response),
+        allowToolCalls,
+      );
     };
 
     try {
@@ -221,6 +253,25 @@ export class QwenApiClient {
         // "The chat is in progress!".
         await this.stopStream(normalizedToken, chatId).catch(() => undefined);
         throw error;
+      }
+
+      if (error instanceof WafChallengeError) {
+        if (!this.browser) {
+          throw error;
+        }
+        // Aliyun WAF завернул прямой серверный стрим — повторяем тот же запрос
+        // внутри реальной браузерной сессии (cookies + браузерный fingerprint).
+        log(
+          "[qwen-api] Aliyun WAF blocked node-streaming, retrying via browser session",
+        );
+        yield* this.sendViaBrowser(
+          requestUrlFor(chatId),
+          normalizedToken,
+          body,
+          allowToolCalls,
+          params.abortSignal,
+        );
+        return;
       }
 
       if (isChatInProgress) {
@@ -349,17 +400,22 @@ export class QwenApiClient {
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${params.token}`,
-        "X-Requested-With": "XMLHttpRequest",
+        Accept: "*/*",
+        ...qwenAppHeaders(),
         Referer: `https://chat.qwen.ai/c/${params.chatId}`,
         Origin: "https://chat.qwen.ai",
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "User-Agent": QWEN_USER_AGENT,
       },
       body: JSON.stringify(params.body),
       signal: params.abortSignal,
     });
 
-    log(`[qwen-api] response status=${response.status}`);
+    const contentType = (
+      response.headers.get("content-type") ?? ""
+    ).toLowerCase();
+    log(
+      `[qwen-api] response status=${response.status} contentType=${contentType || "n/a"}`,
+    );
 
     if (response.status === 401) {
       throw new AuthExpiredError(PROVIDER_ID);
@@ -382,6 +438,26 @@ export class QwenApiClient {
       throw new ProviderError(PROVIDER_ID, message, response.status);
     }
 
+    // completions обязан вернуть SSE. Любой не-event-stream ответ — ошибка или
+    // анти-бот: Aliyun WAF (text/html) либо Alibaba x5sec/RGV587 (JSON с
+    // FAIL_SYS_USER_VALIDATE и ссылкой на /punish). Уводим такое в браузер.
+    if (!contentType.includes("text/event-stream")) {
+      const text = (await response.text().catch(() => "")).slice(0, 400);
+      if (
+        contentType.includes("text/html") ||
+        /FAIL_SYS_USER_VALIDATE|RGV587|x5sec|_____tmd_____|\/punish/i.test(text)
+      ) {
+        throw new WafChallengeError(
+          PROVIDER_ID,
+          `anti-bot challenge (content-type=${contentType || "n/a"}): ${text}`,
+        );
+      }
+      throw new ProviderError(
+        PROVIDER_ID,
+        `Unexpected non-SSE response (content-type=${contentType || "n/a"}): ${text}`,
+      );
+    }
+
     if (!response.body) {
       throw new ProviderError(PROVIDER_ID, "Response body is empty");
     }
@@ -389,50 +465,161 @@ export class QwenApiClient {
     return response;
   }
 
-  async createChat(token: string, model: string): Promise<string | undefined> {
-    const response = await fetch(QWEN_CREATE_CHAT_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-        Accept: "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        Origin: "https://chat.qwen.ai",
-        Referer: "https://chat.qwen.ai/",
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-      },
-      body: JSON.stringify({
-        title: "New chat",
-        models: [model],
-        chat_mode: "normal",
-        chat_type: "t2t",
-        timestamp: Date.now(),
-      }),
+  /**
+   * Декодирует тело прямого ответа в поток строковых чанков для parseSSEText.
+   * При досрочном прекращении итерации (стоп-страж парсера) отменяет reader.
+   */
+  private async *readResponseBody(
+    response: Response,
+  ): AsyncIterable<string> {
+    const body = response.body;
+    if (!body) {
+      throw new ProviderError(PROVIDER_ID, "Response body is empty");
+    }
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          const tail = decoder.decode();
+          if (tail) {
+            yield tail;
+          }
+          break;
+        }
+        if (value?.length) {
+          yield decoder.decode(value, { stream: true });
+        }
+      }
+    } finally {
+      try {
+        await reader.cancel();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /**
+   * Повторяет запрос через браузерную сессию, когда WAF заблокировал прямой путь.
+   */
+  private async *sendViaBrowser(
+    requestUrl: string,
+    token: string,
+    body: QwenRequestBody,
+    allowToolCalls: boolean,
+    abortSignal?: AbortSignal,
+  ): AsyncIterable<AIStreamChunk> {
+    if (!this.browser) {
+      throw new ProviderError(
+        PROVIDER_ID,
+        "Browser fallback is unavailable",
+      );
+    }
+    const chunks = this.browser.streamChat({
+      url: requestUrl,
+      token,
+      body,
+      chatId: body.chat_id,
+      abortSignal,
     });
+    yield* this.parseSSEText(chunks, allowToolCalls);
+  }
 
-    const bodyText = await response.text().catch(() => "");
+  async createChat(token: string, model: string): Promise<string | undefined> {
+    const payload = {
+      title: "New chat",
+      models: [model],
+      chat_mode: "normal",
+      chat_type: "t2t",
+      timestamp: Date.now(),
+    };
 
-    if (!response.ok) {
+    const result = await this.postCreateChat(token, payload);
+    if (!result || !result.ok) {
       log(
-        `[qwen-api] createChat failed status=${response.status} body=${bodyText.slice(0, 300)}`,
+        `[qwen-api] createChat failed status=${result?.status ?? "n/a"} body=${(
+          result?.text ?? ""
+        ).slice(0, 300)}`,
       );
       return undefined;
     }
 
     let data: { data?: { id?: string; chat_id?: string }; id?: string } = {};
     try {
-      data = JSON.parse(bodyText);
+      data = JSON.parse(result.text);
     } catch {
-      log(`[qwen-api] createChat ok but response is not JSON: ${bodyText.slice(0, 200)}`);
+      log(
+        `[qwen-api] createChat ok but response is not JSON: ${result.text.slice(0, 200)}`,
+      );
       return undefined;
     }
 
     const chatId = data?.data?.id ?? data?.data?.chat_id ?? data?.id;
     if (!chatId) {
-      log(`[qwen-api] createChat ok but no id in response: ${bodyText.slice(0, 300)}`);
+      log(`[qwen-api] createChat ok but no id in response: ${result.text.slice(0, 300)}`);
     }
     return chatId;
+  }
+
+  /**
+   * POST /chats/new: сначала прямой серверный запрос; при HTTP-ошибке, WAF-HTML
+   * или сетевом сбое — повтор через браузерную сессию (если она доступна).
+   */
+  private async postCreateChat(
+    token: string,
+    payload: unknown,
+  ): Promise<{ ok: boolean; status: number; text: string } | undefined> {
+    // 1) Прямой серверный запрос.
+    let nodeResult: { ok: boolean; status: number; text: string } | undefined;
+    let nodeBlocked = false;
+    try {
+      const response = await fetch(QWEN_CREATE_CHAT_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          Accept: "*/*",
+          ...qwenAppHeaders(),
+          Origin: "https://chat.qwen.ai",
+          Referer: "https://chat.qwen.ai/",
+          "User-Agent": QWEN_USER_AGENT,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const text = await response.text().catch(() => "");
+      const contentType = (
+        response.headers.get("content-type") ?? ""
+      ).toLowerCase();
+      const wafBlocked = contentType.includes("text/html");
+
+      if (response.ok && !wafBlocked) {
+        return { ok: true, status: response.status, text };
+      }
+      nodeResult = { ok: response.ok, status: response.status, text };
+      nodeBlocked = true;
+      log(
+        `[qwen-api] createChat via node blocked (status=${response.status} waf=${wafBlocked})`,
+      );
+    } catch (err) {
+      nodeBlocked = true;
+      log(`[qwen-api] createChat node error (${String(err)})`);
+    }
+
+    // 2) Fallback через браузерную сессию (ошибки моста не смешиваем с node-путём).
+    if (nodeBlocked && this.browser) {
+      log("[qwen-api] createChat retrying via browser session");
+      return await this.browser
+        .postJson(QWEN_CREATE_CHAT_URL, token, payload)
+        .catch((err) => {
+          log(`[qwen-api] createChat via browser failed: ${String(err)}`);
+          return undefined;
+        });
+    }
+
+    return nodeResult;
   }
 
   private async stopStream(token: string, chatId: string): Promise<void> {
@@ -706,14 +893,9 @@ export class QwenApiClient {
   }
 
   private async *parseSSEText(
-    response: Response,
+    chunkSource: AsyncIterable<string>,
     allowToolCalls: boolean,
   ): AsyncIterable<AIStreamChunk> {
-    const body = response.body;
-    if (!body) {
-      throw new ProviderError(PROVIDER_ID, "Response body is empty");
-    }
-
     let fullText = "";
     const nativeToolCalls: AIStreamChunk[] = [];
     let chunkCount = 0;
@@ -735,28 +917,9 @@ export class QwenApiClient {
     let phaseDebugCount = 0;
     const PHASE_DEBUG_LIMIT = 200;
 
-    const reader = body.getReader();
-    const decoder = new TextDecoder();
     let buffer = "";
     let firstAnswerAt: number | undefined;
-    let lastChunkAt = Date.now();
-    let idleWarnLevel = 0;
     let stoppedByGuard = false;
-
-    const maybeLogIdle = () => {
-      const idleMs = Date.now() - lastChunkAt;
-      const thresholds = [5000, 15000, 30000];
-      while (
-        idleWarnLevel < thresholds.length &&
-        idleMs >= thresholds[idleWarnLevel]
-      ) {
-        const sec = Math.floor(idleMs / 1000);
-        log(
-          `[qwen-api] SSE idle ${sec}s (no new bytes) fullTextLength=${fullText.length} chunkCount=${chunkCount}`,
-        );
-        idleWarnLevel++;
-      }
-    };
 
     const processParsed = function* (
       parsed: QwenStreamChunk,
@@ -903,20 +1066,10 @@ export class QwenApiClient {
       yield* processParsed(parsed);
     };
 
-    while (true) {
-      maybeLogIdle();
-      const { done, value } = await reader.read();
-      if (done) {
-        buffer += decoder.decode();
-        break;
-      }
-
-      if (value?.length) {
-        lastChunkAt = Date.now();
-        idleWarnLevel = 0;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
+    // Прерывание итерации (break) закрывает chunkSource: для прямого ответа он
+    // отменит reader, для браузерного пути — остановит in-page fetch.
+    for await (const piece of chunkSource) {
+      buffer += piece;
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
 
@@ -929,11 +1082,6 @@ export class QwenApiClient {
         log(
           "[qwen-api] transcript boundary detected (fabricated User/Tool-result turn) — stopping stream",
         );
-        try {
-          await reader.cancel();
-        } catch {
-          // ignore
-        }
         break;
       }
 
@@ -956,12 +1104,6 @@ export class QwenApiClient {
           log(
             `[qwen-api] stream guard stop: no tool_call elapsedSinceAnswerMs=${elapsedSinceAnswerMs} fullTextLength=${fullText.length}`,
           );
-
-          try {
-            await reader.cancel();
-          } catch {
-            // ignore
-          }
           break;
         }
       }

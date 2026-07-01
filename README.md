@@ -98,6 +98,44 @@ dead entries that fail on use.
 4. Responses are delivered to VS Code as streamed chunks.
 5. The extension handles tool calling and thinking-mode when available.
 
+### Qwen and the Aliyun WAF
+
+`chat.qwen.ai` sits behind the Aliyun WAF and Alibaba's anti-bot layer, which
+reject plain server-side requests. Qwen keeps working through a two-tier flow:
+
+**1. Direct request (fast path).** The Qwen client calls the API directly from
+Node while mirroring the request headers the web app sends (`source`, `version`,
+`x-request-id`, `timezone`, `bx-v`). That is enough to pass the WAF for most
+endpoints (e.g. creating a chat), and responses stream natively.
+
+**2. Browser bridge (fallback).** When a response is a challenge instead of the
+expected stream — an HTML challenge page, or an `x5sec` / `RGV587`
+(`FAIL_SYS_USER_VALIDATE`) JSON body — the request is transparently replayed
+inside the real browser session, which carries the genuine cookies and browser
+network fingerprint the WAF trusts. The SSE response is still streamed back to
+VS Code chunk by chunk.
+
+The bridge reuses the persistent profile created at sign-in
+(`~/.ai-free-vscode/browser-profile`), so no extra login is needed, and it
+degrades gracefully:
+
+1. **Headless + stealth** first — no visible window (fingerprint is masked so the
+   anti-bot treats the session as a normal browser).
+2. If the anti-bot detects it, the bridge **escalates to a real (headed) Chrome**
+   automatically, with its window minimized so it stays out of your way.
+3. If a one-time **captcha** is required, that window is brought to the front and
+   a notification appears — solve it once, then resend your request. The
+   verification cookie is stored in the profile, so you are not asked again for a
+   while.
+
+You normally don't need to touch this, but you can pin the browser mode in
+**Settings → AI Free VSCode → `freeAI.qwen.browserMode`** (`auto` / `headed` /
+`headless`; changing it needs a window reload).
+
+> This is a best-effort resilience layer. Provider-side anti-bot rules change
+> frequently, so a blocked Qwen request may still occasionally surface — retrying
+> usually clears it.
+
 ## Installation
 
 ### From the VS Code Marketplace (recommended)
@@ -179,6 +217,8 @@ before changing the file.
 | Setting                          | Default  | Description                                                  |
 | -------------------------------- | -------- | ------------------------------------------------------------ |
 | `freeAI.playwright.timeout`      | `120000` | Browser sign-in timeout in milliseconds                     |
+| `freeAI.qwen.browserMode`        | `auto`   | Qwen anti-bot fallback browser: `auto` / `headed` / `headless` |
+| `freeAI.commit.enabled`          | `true`   | Show the ✨ commit message generation button in Source Control |
 | `freeAI.commit.model`            | `auto`   | Model for commit messages (`auto` = first available)        |
 | `freeAI.commit.prompt`           | —        | Instruction prepended to the diff for commit generation     |
 | `freeAI.suggestions.enabled`     | `false`  | Enable manual inline ghost-text suggestions                 |

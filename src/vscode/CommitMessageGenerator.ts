@@ -184,6 +184,16 @@ function cleanCommitMessage(raw: string): string {
 }
 
 async function generateCommitMessage(scmArg?: unknown): Promise<void> {
+  const enabled = vscode.workspace
+    .getConfiguration("freeAI")
+    .get<boolean>("commit.enabled", true);
+  if (!enabled) {
+    vscode.window.showInformationMessage(
+      "Commit message generation is disabled (freeAI.commit.enabled).",
+    );
+    return;
+  }
+
   const api = await getGitApi();
   if (!api) {
     vscode.window.showErrorMessage(

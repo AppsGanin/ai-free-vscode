@@ -2,7 +2,7 @@
   "name": "free-ai-vscode",
   "displayName": "AI Free VSCode for Copilot Chat",
   "description": "Use free AI models directly in Copilot Chat",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "publisher": "AppsGanin",
   "license": "MIT",
   "private": false,
@@ -72,8 +72,14 @@
       "scm/title": [
         {
           "command": "free-ai-vscode.generateCommitMessage",
-          "when": "scmProvider == git",
+          "when": "scmProvider == git && config.freeAI.commit.enabled",
           "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "free-ai-vscode.generateCommitMessage",
+          "when": "config.freeAI.commit.enabled"
         }
       ]
     },
@@ -85,10 +91,30 @@
           "default": 120000,
           "description": "Browser sign-in timeout in milliseconds"
         },
+        "freeAI.qwen.browserMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "headed",
+            "headless"
+          ],
+          "enumDescriptions": [
+            "Try a hidden headless browser first, and automatically fall back to a minimized visible window only if the Qwen anti-bot blocks it (recommended)",
+            "Always use a real (minimized) browser window — most reliable against the anti-bot, but a window is created",
+            "Always headless with no window and no fallback — no window ever, but the anti-bot may block requests"
+          ],
+          "default": "auto",
+          "markdownDescription": "How the Qwen anti-bot (WAF) fallback browser runs. `auto` is recommended. Changing this needs a window reload."
+        },
         "freeAI.debug": {
           "type": "boolean",
           "default": false,
           "description": "Enable verbose DEBUG logs in the 'AI Free VSCode' output channel (auth flow, requests, streaming). Useful for troubleshooting."
+        },
+        "freeAI.commit.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the ✨ commit message generation button in the Source Control view."
         },
         "freeAI.commit.model": {
           "type": "string",
