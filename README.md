@@ -265,25 +265,6 @@ Provider keys: `qwen`, `deepseek`, `kimi`. Adding a new provider means
 registering its key in [`src/providers/providerConfig.ts`](src/providers/providerConfig.ts),
 [`esbuild.js`](esbuild.js), and the factory map in [`src/extension.ts`](src/extension.ts).
 
-## Project structure
-
-- `src/extension.ts` — extension activation, command registration, provider wiring
-- `src/logger.ts` — shared logging utility for extension output
-- `src/providers/BaseAIProvider.ts` — abstract provider interface for all models
-- `src/providers/types.ts` — shared AI request/response type definitions
-- `src/providers/common/` — shared provider utilities (model resolver, Chromium guard, tool calling helpers)
-- `src/providers/UnifiedProvider.ts` — unified provider combining all enabled providers
-- `src/providers/providerConfig.ts` — registry of providers and their build-time on/off state
-- `src/providers/<name>/` — each provider's client, auth manager, and model definitions
-- `src/vscode/ProviderRegistry.ts` — registers the provider with VS Code LM API
-- `src/vscode/VSCodeLMAdapter.ts` — adapter between VS Code LM API and providers
-- `src/vscode/CommitMessageGenerator.ts` — commit message generation command
-- `src/vscode/InlineCompletionProvider.ts` — manual inline ghost-text suggestions
-- `src/vscode/FixProblemProvider.ts` — "Fix with AI" Quick Fix with diff preview
-- `esbuild.js` — bundles source into `dist/extension.js`
-- `package.json` — extension metadata, commands, and dependencies
-- `tsconfig.json` — TypeScript configuration
-
 ## Requirements
 
 - VS Code `^1.105.0`
