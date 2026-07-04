@@ -19,7 +19,7 @@ const CREATE_SESSION_PATH = "/api/v0/chat_session/create";
 const CREATE_POW_CHALLENGE_PATH = "/api/v0/chat/create_pow_challenge";
 const COMPLETION_PATH = "/api/v0/chat/completion";
 const STOP_STREAM_PATH = "/api/v0/chat/stop_stream";
-const APP_VERSION = "1.0.2";
+const APP_VERSION = "2.2.0";
 const DEEPSEEK_SHA3_WASM =
   "https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm";
 

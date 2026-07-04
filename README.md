@@ -73,9 +73,10 @@ dead entries that fail on use.
 
 ### DeepSeek
 
-| Model    | ID                 | Context |
-| -------- | ------------------ | ------- |
-| DeepSeek | `deepseek-default` | 128K    |
+| Model           | ID                 | Context |
+| --------------- | ------------------ | ------- |
+| DeepSeek        | `deepseek-default` | 128K    |
+| DeepSeek Expert | `deepseek-expert`  | 128K    |
 
 ### Kimi
 
