@@ -276,3 +276,28 @@ registering its key in [`src/providers/providerConfig.ts`](src/providers/provide
 This is an unofficial extension. Authentication is handled through a browser session, and the integration may break if providers change their web APIs or terms.
 
 > Use at your own risk. Web session automation may violate provider policies.
+
+## 💝 Support the project
+
+AI Free VSCode is built in spare time and distributed for free. If the extension has been useful, you can support its development.
+
+The easiest way is via **[DonationAlerts](https://www.donationalerts.com/r/dmitryapp)** or **[Boosty](https://boosty.to/githubapps)** (one-time or recurring). You can also donate in USDT — pick a
+network and **carefully** copy the address (the sender's and recipient's networks must match):
+
+| Network          | Token | Address                                            |
+| ---------------- | ----- | -------------------------------------------------- |
+| TRC20 (Tron)     | USDT  | `TJwyrPVEZVZ1YrcmDiZTyFjLo3Q2DmEGzs`               |
+| ERC20 (Ethereum) | USDT  | `0xf9d663146ce902da91911b214c71cc73a5269d1d`       |
+| Solana           | USDT  | `2qAZRTbaUMTfYuZbD1dCYHjkYgxkw4dUYE9XY3JhC2Cs`     |
+| TON              | USDT  | `UQDoat731MLYuIw8ayL3Vhhw7zTBbLvRaQFmDvab--CNNI7e` |
+
+If you also use Bybit, the simplest option is a transfer by **UID** (instant and fee-free):
+
+| Exchange | UID         |
+| -------- | ----------- |
+| Bybit    | `136462734` |
+
+> The cheapest fees are on the **TRON (TRC20)** and **TON** networks. Send only
+> **USDT** and only on the specified network — a transfer on the wrong network is unrecoverable.
+
+Thanks for your support! 🙏
