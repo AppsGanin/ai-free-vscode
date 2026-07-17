@@ -1,5 +1,11 @@
 import * as vscode from "vscode";
 import { log } from "../logger";
+import {
+  COMMIT_FEATURE,
+  promptNoModels,
+  resolveFeatureModel,
+  selectFeatureModel,
+} from "./ModelPicker";
 
 const VENDOR = "free-ai-vscode";
 const MAX_DIFF_CHARS = 16000;
@@ -43,7 +49,7 @@ export function registerCommitMessageCommands(
 
   context.subscriptions.push(
     vscode.commands.registerCommand(`${VENDOR}.selectCommitModel`, () =>
-      selectCommitModel(),
+      selectFeatureModel(COMMIT_FEATURE),
     ),
   );
 }
@@ -87,80 +93,6 @@ function resolveRepository(
 
   // Несколько репозиториев и не удалось сопоставить — берём первый.
   return api.repositories[0];
-}
-
-async function pickConfiguredModel(): Promise<
-  vscode.LanguageModelChat | undefined
-> {
-  const models = await vscode.lm.selectChatModels({ vendor: VENDOR });
-  if (models.length === 0) {
-    return undefined;
-  }
-
-  const configured = String(
-    vscode.workspace.getConfiguration("freeAI.commit").get("model", "auto"),
-  ).trim();
-
-  if (configured && configured.toLowerCase() !== "auto") {
-    const found = models.find(
-      (m) =>
-        m.id === configured ||
-        m.family === configured ||
-        m.name === configured,
-    );
-    if (found) {
-      return found;
-    }
-    log(
-      `[commit] configured model "${configured}" not available, falling back to first of ${models.length}`,
-    );
-  }
-
-  return models[0];
-}
-
-async function selectCommitModel(): Promise<void> {
-  const models = await vscode.lm.selectChatModels({ vendor: VENDOR });
-  if (models.length === 0) {
-    const action = await vscode.window.showWarningMessage(
-      "No models available. Sign in to Qwen, DeepSeek or Kimi.",
-      "Sign In",
-    );
-    if (action === "Sign In") {
-      await vscode.commands.executeCommand(`${VENDOR}.login`);
-    }
-    return;
-  }
-
-  const items: Array<vscode.QuickPickItem & { modelId: string }> = [
-    {
-      label: "Auto (first available)",
-      description: "auto",
-      modelId: "auto",
-    },
-    ...models.map((m) => ({
-      label: m.name,
-      description: m.id,
-      detail: m.family,
-      modelId: m.id,
-    })),
-  ];
-
-  const picked = await vscode.window.showQuickPick(items, {
-    title: "Commit message model",
-    placeHolder: "Select a model",
-  });
-  if (!picked) {
-    return;
-  }
-
-  await vscode.workspace
-    .getConfiguration("freeAI.commit")
-    .update("model", picked.modelId, vscode.ConfigurationTarget.Global);
-
-  vscode.window.showInformationMessage(
-    `Commit model: ${picked.label}`,
-  );
 }
 
 function cleanCommitMessage(raw: string): string {
@@ -225,15 +157,9 @@ async function generateCommitMessage(scmArg?: unknown): Promise<void> {
     return;
   }
 
-  const model = await pickConfiguredModel();
+  const model = await resolveFeatureModel(COMMIT_FEATURE);
   if (!model) {
-    const action = await vscode.window.showWarningMessage(
-      "No models available. Sign in to Qwen, DeepSeek or Kimi.",
-      "Sign In",
-    );
-    if (action === "Sign In") {
-      await vscode.commands.executeCommand(`${VENDOR}.login`);
-    }
+    await promptNoModels();
     return;
   }
 

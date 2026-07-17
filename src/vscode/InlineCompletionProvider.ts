@@ -1,5 +1,10 @@
 import * as vscode from "vscode";
 import { log } from "../logger";
+import {
+  SUGGESTIONS_FEATURE,
+  resolveFeatureModel,
+  selectFeatureModel,
+} from "./ModelPicker";
 
 const VENDOR = "free-ai-vscode";
 
@@ -17,7 +22,6 @@ const SYSTEM_PROMPT = [
 
 interface SuggestionConfig {
   enabled: boolean;
-  model: string;
   maxPrefixChars: number;
   maxSuffixChars: number;
 }
@@ -37,33 +41,9 @@ function readConfig(): SuggestionConfig {
 
   return {
     enabled: Boolean(cfg.get("enabled", false)),
-    model: String(cfg.get("model", "auto")).trim(),
     maxPrefixChars,
     maxSuffixChars,
   };
-}
-
-async function pickModel(
-  configured: string,
-): Promise<vscode.LanguageModelChat | undefined> {
-  const models = await vscode.lm.selectChatModels({ vendor: VENDOR });
-  if (models.length === 0) {
-    return undefined;
-  }
-
-  if (configured && configured.toLowerCase() !== "auto") {
-    const found = models.find(
-      (m) =>
-        m.id === configured ||
-        m.family === configured ||
-        m.name === configured,
-    );
-    if (found) {
-      return found;
-    }
-  }
-
-  return models[0];
 }
 
 function stripCodeFences(text: string): string {
@@ -114,7 +94,7 @@ class FreeAIInlineCompletionProvider
       return undefined;
     }
 
-    const model = await pickModel(config.model);
+    const model = await resolveFeatureModel(SUGGESTIONS_FEATURE);
     if (!model || token.isCancellationRequested) {
       return undefined;
     }
@@ -227,6 +207,12 @@ export function registerInlineCompletions(
           "editor.action.inlineSuggest.trigger",
         );
       },
+    ),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(`${VENDOR}.selectSuggestionsModel`, () =>
+      selectFeatureModel(SUGGESTIONS_FEATURE),
     ),
   );
 }

@@ -1,5 +1,10 @@
 import * as vscode from "vscode";
 import { log } from "../logger";
+import {
+  FIX_FEATURE,
+  resolveFeatureModel,
+  selectFeatureModel,
+} from "./ModelPicker";
 
 const VENDOR = "free-ai-vscode";
 const FIX_COMMAND = `${VENDOR}.fixProblem`;
@@ -63,31 +68,6 @@ async function closePreviewTab(previewUri: vscode.Uri): Promise<void> {
       }
     }
   }
-}
-
-async function pickModel(): Promise<vscode.LanguageModelChat | undefined> {
-  const models = await vscode.lm.selectChatModels({ vendor: VENDOR });
-  if (models.length === 0) {
-    return undefined;
-  }
-
-  const configured = String(
-    vscode.workspace.getConfiguration("freeAI.fix").get("model", "auto"),
-  ).trim();
-
-  if (configured && configured.toLowerCase() !== "auto") {
-    const found = models.find(
-      (m) =>
-        m.id === configured ||
-        m.family === configured ||
-        m.name === configured,
-    );
-    if (found) {
-      return found;
-    }
-  }
-
-  return models[0];
 }
 
 function stripCodeFences(text: string): string {
@@ -233,7 +213,7 @@ async function fixProblem(
     return;
   }
 
-  const model = await pickModel();
+  const model = await resolveFeatureModel(FIX_FEATURE);
   if (!model) {
     const action = await vscode.window.showWarningMessage(
       "No models available. Sign in to Qwen or DeepSeek.",
@@ -423,6 +403,12 @@ export function registerFixProblem(context: vscode.ExtensionContext): void {
       FIX_COMMAND,
       (uriArg?: vscode.Uri, diagnosticsArg?: vscode.Diagnostic[]) =>
         fixProblem(uriArg, diagnosticsArg),
+    ),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(`${VENDOR}.selectFixModel`, () =>
+      selectFeatureModel(FIX_FEATURE),
     ),
   );
 }

@@ -56,16 +56,24 @@
       },
       {
         "command": "free-ai-vscode.selectCommitModel",
-        "title": "AI Free VSCode — Select Commit Model"
+        "title": "AI Free VSCode — Change Commit Model"
       },
       {
         "command": "free-ai-vscode.triggerInlineSuggestion",
         "title": "AI Free VSCode — Inline Suggestion (Ghost Text)"
       },
       {
+        "command": "free-ai-vscode.selectSuggestionsModel",
+        "title": "AI Free VSCode — Change Completions Model"
+      },
+      {
         "command": "free-ai-vscode.fixProblem",
         "title": "AI Free VSCode — Fix Problem (Error/Warning)",
         "icon": "$(sparkle)"
+      },
+      {
+        "command": "free-ai-vscode.selectFixModel",
+        "title": "AI Free VSCode — Change Fix Model"
       }
     ],
     "menus": {
@@ -119,7 +127,7 @@
         "freeAI.commit.model": {
           "type": "string",
           "default": "auto",
-          "markdownDescription": "Model for commit message generation. `auto` = first available. You can set a model id (e.g. `deepseek-default`) or pick one via the **AI Free VSCode — Select Commit Model** command."
+          "markdownDescription": "Model for commit message generation. `auto` = first available. You can set a model id/family/name or pick one via the **AI Free VSCode — Change Commit Model** command."
         },
         "freeAI.commit.prompt": {
           "type": "string",
@@ -135,7 +143,7 @@
         "freeAI.suggestions.model": {
           "type": "string",
           "default": "auto",
-          "markdownDescription": "Model for inline suggestions. `auto` = first available. You can set a model id/family/name."
+          "markdownDescription": "Model for inline suggestions. `auto` = first available. You can set a model id/family/name or pick one via the **AI Free VSCode — Change Completions Model** command."
         },
         "freeAI.suggestions.maxPrefixChars": {
           "type": "number",
@@ -157,7 +165,7 @@
         "freeAI.fix.model": {
           "type": "string",
           "default": "auto",
-          "markdownDescription": "Model for fixing problems. `auto` = first available. You can set a model id/family/name."
+          "markdownDescription": "Model for fixing problems. `auto` = first available. You can set a model id/family/name or pick one via the **AI Free VSCode — Change Fix Model** command."
         }
       }
     },

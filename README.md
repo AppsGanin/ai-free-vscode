@@ -187,7 +187,7 @@ straight into the commit input box.
 
 - Model: `freeAI.commit.model` (`auto` = first available)
 - Prompt: `freeAI.commit.prompt` (Conventional Commits, English by default)
-- Pick a model quickly: command `AI Free VSCode — Select commit model`
+- Pick a model quickly: command `AI Free VSCode — Change Commit Model`
 
 ### Inline suggestions (ghost text)
 
@@ -199,6 +199,8 @@ while typing.
 - Accept with `Tab`, dismiss with `Esc`
 - Enable first: set `freeAI.suggestions.enabled` to `true` (the hotkey will offer
   to enable it)
+- Model: `freeAI.suggestions.model` (`auto` = first available)
+- Pick a model quickly: command `AI Free VSCode — Change Completions Model`
 
 > These backends run through a web session (DeepSeek also solves a PoW challenge),
 > so expect noticeably higher latency than native Copilot.
@@ -211,7 +213,8 @@ lines (indentation is preserved) and shows a **diff preview** with Apply / Cance
 before changing the file.
 
 - Toggle the action: `freeAI.fix.enabled`
-- Model: `freeAI.fix.model`
+- Model: `freeAI.fix.model` (`auto` = first available)
+- Pick a model quickly: command `AI Free VSCode — Change Fix Model`
 
 ## Configuration
 
