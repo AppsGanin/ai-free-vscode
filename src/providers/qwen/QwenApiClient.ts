@@ -19,7 +19,7 @@ import { QWEN_MODELS, resolveModelId, toQwenApiModelType } from "./QwenModels";
 const QWEN_CHAT_API_URL = "https://chat.qwen.ai/api/v2/chat/completions";
 const QWEN_CREATE_CHAT_URL = "https://chat.qwen.ai/api/v2/chats/new";
 const QWEN_STOP_CHAT_URL = "https://chat.qwen.ai/api/v2/chat/completions/stop";
-const PROVIDER_ID = "ai-free-vscode";
+const PROVIDER_ID = "ai-free-vscode-qwen";
 
 // Прикладные заголовки, которые шлёт веб-приложение chat.qwen.ai. Судя по трафику,
 // именно они (source/version/x-request-id), а не тяжёлая подпись bx-*, — базовый

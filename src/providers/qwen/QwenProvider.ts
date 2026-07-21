@@ -9,7 +9,7 @@ import { QwenBrowserBridge } from "./QwenBrowserBridge";
 import { QWEN_MODELS, resolveModelId, toQwenApiModelType } from "./QwenModels";
 
 export class QwenProvider extends BaseAIProvider {
-  readonly id = "ai-free-vscode";
+  readonly id = "ai-free-vscode-qwen";
   readonly displayName = "Qwen (Free)";
 
   private readonly authManager = new QwenAuthManager();

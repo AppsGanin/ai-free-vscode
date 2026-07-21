@@ -3,7 +3,7 @@ import { createLogger, errToString } from "../../logger";
 import { AuthExpiredError, ProviderError, RateLimitError } from "../types";
 import { launchQwenContext } from "./QwenBrowser";
 
-const PROVIDER_ID = "ai-free-vscode";
+const PROVIDER_ID = "ai-free-vscode-qwen";
 const QWEN_HOME_URL = "https://chat.qwen.ai";
 const SINK_BINDING = "__qwenSseSink";
 // Прикладные заголовки веб-приложения (см. qwenAppHeaders в QwenApiClient).

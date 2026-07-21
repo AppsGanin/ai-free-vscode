@@ -3,8 +3,7 @@ import * as vscode from "vscode";
 import { createLogger, errToString } from "../../logger";
 import { BROWSER_DATA_DIR, launchQwenContext } from "./QwenBrowser";
 
-const TOKEN_SECRET_KEY = "ai-free-vscode.token";
-const LEGACY_TOKEN_SECRET_KEYS = ["qwen-free.token"];
+const TOKEN_SECRET_KEY = "ai-free-vscode.qwen.token";
 const QWEN_AUTH_URL = "https://chat.qwen.ai/auth?action=signin";
 
 const qlog = createLogger("qwen-auth");
@@ -107,13 +106,7 @@ export class QwenAuthManager {
    * Удаляет сохранённый токен.
    */
   async logout(secrets: vscode.SecretStorage): Promise<void> {
-    // Текущий ключ
     await secrets.delete(TOKEN_SECRET_KEY);
-
-    // legacy-ключи после переименования провайдера
-    for (const key of LEGACY_TOKEN_SECRET_KEYS) {
-      await secrets.delete(key);
-    }
 
     // Дополнительно чистим persistent profile браузера,
     // чтобы следующий login не подтягивал старую веб-сессию автоматически.

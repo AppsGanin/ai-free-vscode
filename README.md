@@ -93,7 +93,7 @@ dead entries that fail on use.
 
 ## How it works
 
-1. The extension registers a single Copilot Chat provider: `ai-free-vscode`.
+1. The extension registers a single Copilot Chat provider: `free-ai-vscode`.
 2. Signing in launches Playwright and stores the authenticated session in `SecretStorage`.
 3. Requests are routed through the providers' private API streams (see [Supported models](#supported-models)).
 4. Responses are delivered to VS Code as streamed chunks.
