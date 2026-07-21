@@ -52,11 +52,6 @@ const CHAT_IN_PROGRESS_RETRY_DELAYS_MS = [
   500, 1000, 2000, 4000, 7500, 10000, 15000,
 ];
 
-// Повтор на случай действительно транзиентного internal_error. Держим коротким
-// намеренно: если апстрим отвергает сам payload, повторы не помогут, а клиент
-// успевает отменить запрос раньше, чем закончится долгая лестница пауз.
-const INTERNAL_ERROR_RETRY_DELAYS_MS = [0, 1000];
-
 interface QwenRequestBody {
   stream: boolean;
   incremental_output: boolean;
@@ -113,15 +108,6 @@ interface QwenStreamChunk {
   };
   error?: unknown;
   details?: unknown;
-}
-
-/**
- * Апстрим называет эту ошибку по-разному: `internal_error` в поле code и
- * "Internal Error" в details. Ловим обе формы — часть ответов приходит только
- * с одной из них.
- */
-function isInternalErrorMessage(message: string): boolean {
-  return /internal[_ ]error/i.test(message);
 }
 
 function stringifyUnknown(value: unknown, maxLen = 600): string {
@@ -209,15 +195,12 @@ export class QwenApiClient {
       );
       const toolsPrompt = buildToolsSystemPrompt(selectedTools);
 
-      // Ограничение применяем ПОСЛЕ склейки: раньше кап стоял только на
-      // базовом system_message, и блок инструментов его обходил.
-      const combined = body.system_message
+      body.system_message = body.system_message
         ? `${body.system_message}\n\n${toolsPrompt}`
         : toolsPrompt;
-      body.system_message = combined.slice(0, MAX_SYSTEM_MESSAGE_CHARS);
 
       log(
-        `[qwen-api] injected ${selectedTools.length}/${params.tools.length} tools into system_message toolsPromptLen=${toolsPrompt.length} finalSystemMessageLen=${body.system_message.length}`,
+        `[qwen-api] injected ${selectedTools.length}/${params.tools.length} tools into system_message toolsPromptLen=${toolsPrompt.length}`,
       );
     }
 
@@ -260,7 +243,7 @@ export class QwenApiClient {
         !!params.abortSignal?.aborted ||
         error instanceof DOMException ||
         /aborted|aborterror|request aborted/i.test(msg);
-      const isInternal = isInternalErrorMessage(msg);
+      const isInternal = /internal error/i.test(msg);
       const isChatInProgress = /chat is in progress/i.test(msg);
       const isNetworkTerminated = /^terminated$/i.test(msg.trim());
 
@@ -356,60 +339,24 @@ export class QwenApiClient {
       }
 
       if (isInternal) {
-        const retryDelays = INTERNAL_ERROR_RETRY_DELAYS_MS;
         log(
-          `[qwen-api] upstream internal error, retrying in a NEW chat (up to ${retryDelays.length} attempts)`,
+          "[qwen-api] upstream internal error, retrying in a NEW chat with original payload",
         );
 
-        for (let attempt = 0; attempt < retryDelays.length; attempt++) {
-          const delayMs = retryDelays[attempt];
-          if (delayMs > 0) {
-            log(
-              `[qwen-api] waiting ${delayMs}ms before internal_error retry #${attempt + 1}`,
-            );
-            await sleep(delayMs);
-          }
-
-          if (params.abortSignal?.aborted) {
-            throw error;
-          }
-
-          const freshChatId = await this.createChat(
-            normalizedToken,
-            apiModelType,
+        const freshChatId = await this.createChat(
+          normalizedToken,
+          apiModelType,
+        );
+        if (!freshChatId) {
+          throw new ProviderError(
+            PROVIDER_ID,
+            "Qwen internal_error: failed to create a new chat for retry",
           );
-          if (!freshChatId) {
-            log(
-              `[qwen-api] internal_error retry #${attempt + 1}: failed to create a new chat`,
-            );
-            continue;
-          }
-
-          const retryBody = this.buildFreshChatRetryBody(body, freshChatId);
-          try {
-            yield* sendOnce.call(this, retryBody, freshChatId);
-            return;
-          } catch (retryError) {
-            const retryMsg =
-              retryError instanceof Error
-                ? retryError.message
-                : String(retryError);
-            // Не internal_error — это уже другая проблема, повтор не поможет.
-            if (!isInternalErrorMessage(retryMsg)) {
-              throw retryError;
-            }
-            log(
-              `[qwen-api] internal_error retry #${attempt + 1} failed with the same error`,
-            );
-          }
         }
 
-        // Сырой JSON апстрима в чате выглядит как баг расширения — отдаём
-        // человекочитаемое сообщение, детали остаются в логе.
-        throw new ProviderError(
-          PROVIDER_ID,
-          `Qwen upstream is returning an internal error (retried ${retryDelays.length} times). Please try again in a moment, or switch to another model.`,
-        );
+        const retryBody = this.buildFreshChatRetryBody(body, freshChatId);
+        yield* sendOnce.call(this, retryBody, freshChatId);
+        return;
       }
 
       throw error;
@@ -893,21 +840,17 @@ export class QwenApiClient {
       files: [],
       childrenIds: [assistantMsgId],
       extra: { meta: { subChatType: "t2t" } },
-      // output_schema отправляем ВСЕГДА, а не только при включённом thinking.
-      // Раньше запросы с инструментами (а значит с thinking_enabled=false)
-      // уходили без него и стабильно получали internal_error, тогда как запросы
-      // с thinking проходили. Формат `phase` парсер и так ожидает всегда.
       feature_config: {
         thinking_enabled: thinkingConfig.enabled,
         ...(thinkingConfig.enabled
           ? { thinking_budget_tokens: thinkingConfig.budgetTokens }
           : {}),
-        output_schema: "phase",
+        ...(thinkingConfig.enabled ? { output_schema: "phase" } : {}),
       },
     };
 
     log(
-      `[qwen-api] feature_config=${JSON.stringify(message.feature_config)} thinking_mode=${thinkingConfig.mode} hasTools=${Boolean(params.hasTools)}`,
+      `[qwen-api] feature_config thinking_mode=${thinkingConfig.mode} thinking_enabled=${thinkingConfig.enabled} budget=${thinkingConfig.budgetTokens} hasTools=${Boolean(params.hasTools)}`,
     );
 
     return {
