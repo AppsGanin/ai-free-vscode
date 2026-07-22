@@ -4,23 +4,22 @@ import { AuthExpiredError, ProviderError, RateLimitError } from "../types";
 import { launchQwenContext } from "./QwenBrowser";
 
 const PROVIDER_ID = "ai-free-vscode-qwen";
-const QWEN_HOME_URL = "https://chat.qwen.ai";
+const HOME_URL = "https://chat.qwen.ai";
 const SINK_BINDING = "__qwenSseSink";
-// Прикладные заголовки веб-приложения (см. qwenAppHeaders в QwenApiClient).
-const QWEN_WEB_VERSION = "0.2.68";
-const QWEN_BX_V = "2.5.36";
+// App headers of the web client (see appHeaders in QwenApiClient).
+const WEB_VERSION = "0.2.68";
+const BX_V = "2.5.36";
 
-// Таймауты, чтобы мост никогда не «висел» бесконечно, а падал с внятной ошибкой.
+// Timeouts so the bridge fails with a clear error instead of hanging forever.
 const LAUNCH_TIMEOUT_MS = 45000;
 const NAV_TIMEOUT_MS = 20000;
-// Сколько ждём авто-снятия WAF-челленджа (вычисление cookie + перезагрузка).
+/** How long the WAF challenge gets to clear itself (cookie + reload). */
 const WAF_CLEAR_TIMEOUT_MS = 15000;
-// Ожидание ПЕРВОГО ответа от fetch; дольше — считаем зависшим (враждебный
-// headless) и эскалируем. TTFB у рабочего запроса — секунды.
+/** Wait for the FIRST response; longer means a hostile headless hang. */
 const IN_PAGE_FETCH_TIMEOUT_MS = 15000;
-// Сколько ждём, пока пользователь решит интерактивную капчу в окне.
+/** How long the user gets to solve an interactive captcha. */
 const MANUAL_CAPTCHA_TIMEOUT_MS = 120000;
-// Ответ пришёл, но новых событий стрима нет так долго — считаем зависанием.
+/** Response started but no new stream events for this long — treat as hung. */
 const STREAM_IDLE_TIMEOUT_MS = 120000;
 const POST_JSON_TIMEOUT_MS = 45000;
 
@@ -38,7 +37,7 @@ type SinkEvent =
   | { t: "end" }
   | { t: "error"; message: string };
 
-/** wafHit — ответ был WAF/анти-бот челленджем; yielded — наружу уже пошли чанки. */
+/** wafHit — the answer was an anti-bot challenge; yielded — chunks went out. */
 interface RunState {
   wafHit: boolean;
   yielded: boolean;
@@ -48,24 +47,24 @@ export interface BrowserStreamOptions {
   url: string;
   token: string;
   body: unknown;
-  /** Для заголовка Referer (страница чата), если известен chat_id. */
+  /** Chat page for the Referer header, when the chat_id is known. */
   chatId?: string;
   abortSignal?: AbortSignal;
 }
 
 /**
- * Выполняет запросы к Qwen в обход Aliyun WAF, используя реальную браузерную сессию.
+ * Runs Qwen requests through a real browser session, around the Aliyun WAF.
  *
- * WAF фингерпринтит сетевой стек: проходит только сам Chromium, а Node-стек
- * (обычный fetch / context.request) заворачивается даже с clearance-cookie.
- * Поэтому запросы идут через `page.evaluate` в контексте chat.qwen.ai.
+ * The WAF fingerprints the network stack: only Chromium itself gets through,
+ * the Node stack is rejected even with a clearance cookie. So requests are made
+ * with `page.evaluate` in the context of chat.qwen.ai.
  *
- * Страница враждебна к автоматизации и переопределяет `window.fetch`
- * (наш прямой fetch из-за этого зависал). Обход: берём «чистый» `fetch` из
- * свежего same-origin `<iframe>` — он не тронут скриптами страницы, но использует
- * тот же браузерный стек и cookies.
+ * The page is hostile to automation and overrides `window.fetch` (a direct
+ * fetch used to hang). For buffered JSON we take a clean `fetch` from a fresh
+ * same-origin `<iframe>`: untouched by page scripts, same browser stack and
+ * cookies.
  *
- * Одна тёплая вкладка; запросы сериализуются мьютексом (один активный sink).
+ * One warm tab; requests are serialised by a mutex (a single active sink).
  */
 export class QwenBrowserBridge {
   private context: BrowserContext | undefined;
@@ -73,23 +72,20 @@ export class QwenBrowserBridge {
   private activeSink: ((ev: SinkEvent) => void) | null = null;
   private mutexChain: Promise<void> = Promise.resolve();
 
-  // Режим окна моста (см. конструктор):
-  //  - "headed"   — всегда видимое/свёрнутое окно;
-  //  - "headless" — всегда без окна, без эскалации;
-  //  - "auto"     — пробуем headless (со стелсом), при детекте анти-бота один раз
-  //                 эскалируем в headed.
+  // "headless" — no window ever; "headed" — a real (minimized) window.
   private mode: "headless" | "headed";
+  // Set for "auto": start headless and escalate once if the anti-bot bites.
   private readonly canEscalate: boolean;
 
   /**
-   * @param notifyCaptcha — колбэк, показывающий пользователю сообщение о
-   * необходимости пройти капчу (провайдер прокидывает vscode-нотификацию).
+   * @param notifyCaptcha shows the user that a captcha needs solving (the
+   * provider forwards it to a VS Code notification).
    */
   constructor(
     private readonly notifyCaptcha?: (message: string) => void,
     configuredMode: "auto" | "headed" | "headless" = "auto",
   ) {
-    // Env-переменные имеют приоритет над настройкой.
+    // Env variables win over the setting.
     const resolved =
       process.env.QWEN_BRIDGE_HEADED === "1"
         ? "headed"
@@ -101,18 +97,16 @@ export class QwenBrowserBridge {
   }
 
   /**
-   * Стримит chat/completions через браузер, отдавая сырые SSE-строки —
-   * тот же формат, что и прямой ответ, чтобы их парсил общий `parseSSEText`.
+   * Streams chat/completions through the browser, emitting raw SSE strings —
+   * the same shape as a direct response, so the shared parser handles both.
    */
   async *streamChat(opts: BrowserStreamOptions): AsyncIterable<string> {
     const release = await this.acquire();
     try {
-      // Пока наружу не отдан ни один чанк (state.yielded=false), запрос можно
-      // безопасно повторить: и WAF, и зависание случаются до первого чанка.
+      // While nothing has been yielded the request can be safely repeated: both
+      // the WAF and the hangs happen before the first chunk.
       const state: RunState = { wafHit: false, yielded: false };
 
-      // Первый прогон в текущем режиме. В headless враждебная страница может
-      // подвесить fetch — трактуем такое зависание/ошибку как блок и эскалируем.
       let blocked = false;
       try {
         yield* this.runBrowserStream(await this.ensurePage(), opts, state);
@@ -121,26 +115,26 @@ export class QwenBrowserBridge {
         if (state.yielded || !(this.canEscalate && this.mode === "headless")) {
           throw err;
         }
+        // In headless the hostile page may hang the fetch; treat that as a block.
         blog.warn(`headless attempt failed: ${errToString(err)}`);
         blocked = true;
       }
 
-      // headless задетектили → эскалируем в headed и пробуем ещё раз.
       if (blocked && this.canEscalate && this.mode === "headless") {
         blog.info("headless bridge blocked by anti-bot, escalating to headed");
-        await this.relaunchHeaded();
+        this.mode = "headed";
+        await this.close();
         yield* this.runBrowserStream(await this.ensurePage(), opts, state);
       }
 
-      // Всё ещё блок → одна перечистка clearance-cookie (кейс её истечения).
+      // Still blocked → one clearance-cookie refresh (it may have expired).
       if (state.wafHit) {
         blog.info("stream hit WAF, re-clearing cookie and retrying once");
         await this.navigateAndClearWaf(this.page as Page, true);
         yield* this.runBrowserStream(this.page as Page, opts, state);
       }
 
-      // Всё ещё блок → интерактивная капча. Разворачиваем окно и ждём, пока
-      // пользователь решит её, затем повторяем сам запрос автоматически.
+      // Still blocked → interactive captcha.
       if (state.wafHit) {
         yield* this.solveCaptchaAndRetry(opts, state);
       }
@@ -149,66 +143,90 @@ export class QwenBrowserBridge {
     }
   }
 
-  /**
-   * Разворачивает окно, просит решить капчу, ждёт снятия челленджа и повторяет
-   * запрос. Если не решено в отведённое время — бросает понятную ошибку.
-   */
-  private async *solveCaptchaAndRetry(
-    opts: BrowserStreamOptions,
-    state: RunState,
-  ): AsyncIterable<string> {
-    const page = this.page as Page;
-    await this.revealForCaptcha();
-    const solved = await this.waitForWafClear(page, MANUAL_CAPTCHA_TIMEOUT_MS);
-    if (solved) {
-      blog.info("captcha solved by user, retrying request");
-      await this.minimizeWindow(page).catch(() => undefined);
-      yield* this.runBrowserStream(page, opts, state);
-    }
-    if (state.wafHit) {
-      throw new ProviderError(
-        PROVIDER_ID,
-        "Qwen anti-bot challenge — solve the captcha in the browser window, then send your request again",
-      );
-    }
-  }
+  /** POST with a buffered JSON answer (chat creation) via the browser session. */
+  async postJson(
+    url: string,
+    token: string,
+    body: unknown,
+  ): Promise<{ ok: boolean; status: number; text: string }> {
+    const release = await this.acquire();
+    try {
+      const page = await this.ensurePage();
+      const runOnce = async () => {
+        const result = await withTimeout(
+          page.evaluate(BROWSER_JSON_FN, {
+            url,
+            headers: inPageHeaders(token),
+            bodyJson: JSON.stringify(body),
+            timeoutMs: IN_PAGE_FETCH_TIMEOUT_MS,
+          }),
+          POST_JSON_TIMEOUT_MS,
+          "postJson",
+        );
+        blog.debug(`postJson done ok=${result.ok} status=${result.status}`);
+        return result;
+      };
 
-  /** Переоткрывает мост в headed-режиме (после детекта headless). */
-  private async relaunchHeaded(): Promise<void> {
-    this.mode = "headed";
-    await this.close();
-  }
-
-  /**
-   * Выдвигает скрытое за экран окно моста на экран и фокусит вкладку, чтобы
-   * пользователь мог пройти капчу. Показывает vscode-уведомление.
-   */
-  private async revealForCaptcha(): Promise<void> {
-    const page = this.page;
-    const context = this.context;
-    if (page && context) {
-      try {
-        const cdp = await context.newCDPSession(page);
-        const { windowId } = await cdp.send("Browser.getWindowForTarget");
-        // Из свёрнутого/минимизированного окна сперва возвращаем normal,
-        // затем задаём положение и размер отдельным вызовом.
-        await cdp.send("Browser.setWindowBounds", {
-          windowId,
-          bounds: { windowState: "normal" },
-        });
-        await cdp.send("Browser.setWindowBounds", {
-          windowId,
-          bounds: { left: 80, top: 80, width: 1100, height: 820 },
-        });
-        await page.bringToFront();
-      } catch (err) {
-        blog.warn(`revealForCaptcha failed: ${errToString(err)}`);
+      let result = await runOnce();
+      // The clearance cookie on the warm tab may have expired — clear and retry.
+      if (isWafHtml(result.text)) {
+        blog.info(
+          "postJson hit WAF on warm page, re-clearing and retrying once",
+        );
+        await this.navigateAndClearWaf(page, true);
+        result = await runOnce();
       }
+
+      return isWafHtml(result.text)
+        ? { ok: false, status: result.status, text: result.text }
+        : result;
+    } finally {
+      release();
     }
-    this.notifyCaptcha?.(
-      "Qwen requires a one-time verification. Solve the captcha in the opened browser window, then send your request again.",
-    );
   }
+
+  /** Reads the current Bearer token from the live session (localStorage). */
+  async readToken(): Promise<string | undefined> {
+    try {
+      const page = await this.ensurePage();
+      const raw = await page.evaluate(() => {
+        const keys = [
+          "token",
+          "__token",
+          "accessToken",
+          "access_token",
+          "userToken",
+        ];
+        for (const key of keys) {
+          const value = localStorage.getItem(key);
+          if (value) return value;
+        }
+        for (let i = 0; i < localStorage.length; i++) {
+          const value = localStorage.getItem(localStorage.key(i) ?? "");
+          if (value?.startsWith("eyJ")) return value;
+        }
+        return null;
+      });
+      return raw ?? undefined;
+    } catch (err) {
+      blog.warn(`readToken failed: ${errToString(err)}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * Closes the browser. Must be called before an interactive login: a
+   * persistent profile cannot be opened by two contexts at once.
+   */
+  async close(): Promise<void> {
+    const ctx = this.context;
+    this.context = undefined;
+    this.page = undefined;
+    this.activeSink = null;
+    if (ctx) await ctx.close().catch(() => undefined);
+  }
+
+  // ─── Internals ────────────────────────────────────────────────────────────
 
   private async *runBrowserStream(
     page: Page,
@@ -220,9 +238,9 @@ export class QwenBrowserBridge {
     let notify: (() => void) | null = null;
     this.activeSink = (ev) => {
       events.push(ev);
-      const n = notify;
+      const resume = notify;
       notify = null;
-      n?.();
+      resume?.();
     };
 
     const abortInPage = () => {
@@ -232,26 +250,21 @@ export class QwenBrowserBridge {
         })
         .catch(() => undefined);
     };
-    if (opts.abortSignal) {
-      if (opts.abortSignal.aborted) {
-        abortInPage();
-      } else {
-        opts.abortSignal.addEventListener("abort", abortInPage);
-      }
-    }
+    if (opts.abortSignal?.aborted) abortInPage();
+    else opts.abortSignal?.addEventListener("abort", abortInPage);
 
     const runPromise = page
       .evaluate(BROWSER_FETCH_FN, {
         url: opts.url,
-        token: opts.token,
+        headers: {
+          ...inPageHeaders(opts.token),
+          Referer: opts.chatId
+            ? `${HOME_URL}/c/${opts.chatId}`
+            : `${HOME_URL}/`,
+        },
         bodyJson: JSON.stringify(opts.body),
-        referer: opts.chatId
-          ? `${QWEN_HOME_URL}/c/${opts.chatId}`
-          : `${QWEN_HOME_URL}/`,
         sinkName: SINK_BINDING,
         idleTimeoutMs: IN_PAGE_FETCH_TIMEOUT_MS,
-        webVersion: QWEN_WEB_VERSION,
-        bxV: QWEN_BX_V,
       })
       .catch((err) => {
         this.activeSink?.({ t: "error", message: errToString(err) });
@@ -269,13 +282,12 @@ export class QwenBrowserBridge {
             "stream idle",
           );
         }
+
         while (events.length > 0) {
           const ev = events.shift() as SinkEvent;
           switch (ev.t) {
             case "head":
-              if (ev.status === 401) {
-                throw new AuthExpiredError(PROVIDER_ID);
-              }
+              if (ev.status === 401) throw new AuthExpiredError(PROVIDER_ID);
               if (ev.status === 429) {
                 throw new RateLimitError(
                   PROVIDER_ID,
@@ -289,8 +301,8 @@ export class QwenBrowserBridge {
               );
               break;
             case "waf":
-              // Ответ — HTML-челлендж WAF. Прекращаем без throw: внешний
-              // streamChat перечистит cookie и повторит один раз.
+              // HTML challenge. Stop without throwing: streamChat re-clears the
+              // cookie and retries once.
               state.wafHit = true;
               finished = true;
               break;
@@ -307,11 +319,9 @@ export class QwenBrowserBridge {
         }
       }
     } finally {
-      if (opts.abortSignal) {
-        opts.abortSignal.removeEventListener("abort", abortInPage);
-      }
-      // Если консьюмер прервал чтение раньше времени (стоп-страж парсера) —
-      // останавливаем и in-page fetch, чтобы не держать апстрим.
+      opts.abortSignal?.removeEventListener("abort", abortInPage);
+      // The consumer may have stopped reading early (parser guard) — stop the
+      // in-page fetch too, so the upstream is not left running.
       abortInPage();
       this.activeSink = null;
       await runPromise.catch(() => undefined);
@@ -319,159 +329,77 @@ export class QwenBrowserBridge {
   }
 
   /**
-   * POST c JSON-ответом (например, создание чата) через браузерную сессию.
+   * Reveals the window, asks for the captcha, waits for the challenge to clear
+   * and repeats the request.
    */
-  async postJson(
-    url: string,
-    token: string,
-    body: unknown,
-  ): Promise<{ ok: boolean; status: number; text: string }> {
-    const release = await this.acquire();
-    try {
-      const bodyJson = JSON.stringify(body);
-      const page = await this.ensurePage();
+  private async *solveCaptchaAndRetry(
+    opts: BrowserStreamOptions,
+    state: RunState,
+  ): AsyncIterable<string> {
+    const page = this.page as Page;
+    await this.revealForCaptcha();
 
-      const runOnce = async () => {
-        blog.debug("postJson evaluate start");
-        const result = await withTimeout(
-          page.evaluate(BROWSER_JSON_FN, {
-            url,
-            token,
-            bodyJson,
-            timeoutMs: IN_PAGE_FETCH_TIMEOUT_MS,
-            webVersion: QWEN_WEB_VERSION,
-            bxV: QWEN_BX_V,
-          }),
-          POST_JSON_TIMEOUT_MS,
-          "postJson",
-        );
-        blog.debug(`postJson done ok=${result.ok} status=${result.status}`);
-        return result;
-      };
+    if (await this.waitForWafClear(page, MANUAL_CAPTCHA_TIMEOUT_MS)) {
+      blog.info("captcha solved by user, retrying request");
+      await this.setWindowBounds(page, { windowState: "minimized" });
+      yield* this.runBrowserStream(page, opts, state);
+    }
 
-      let result = await runOnce();
-      // Clearance-cookie на тёплой вкладке мог истечь — перечищаем WAF и повторяем.
-      if (isWafHtml(result.text)) {
-        blog.info(
-          "postJson hit WAF on warm page, re-clearing and retrying once",
-        );
-        await this.navigateAndClearWaf(page, true);
-        result = await runOnce();
-      }
-
-      if (isWafHtml(result.text)) {
-        return { ok: false, status: result.status, text: result.text };
-      }
-      return result;
-    } finally {
-      release();
+    if (state.wafHit) {
+      throw new ProviderError(
+        PROVIDER_ID,
+        "Qwen anti-bot challenge — solve the captcha in the browser window, then send your request again",
+      );
     }
   }
 
-  /**
-   * Читает актуальный Bearer-токен из живой сессии (localStorage).
-   * Используется для тихого обновления протухшего токена без повторного входа.
-   */
-  async readToken(): Promise<string | undefined> {
-    try {
-      const page = await this.ensurePage();
-      const raw = await page.evaluate(() => {
-        const keys = [
-          "token",
-          "__token",
-          "accessToken",
-          "access_token",
-          "userToken",
-        ];
-        for (const key of keys) {
-          const val = localStorage.getItem(key);
-          if (val) {
-            return val;
-          }
-        }
-        for (let i = 0; i < localStorage.length; i++) {
-          const key = localStorage.key(i);
-          if (!key) continue;
-          const val = localStorage.getItem(key);
-          if (val && val.startsWith("eyJ")) {
-            return val;
-          }
-        }
-        return null;
-      });
-      return raw ?? undefined;
-    } catch (err) {
-      blog.warn(`readToken failed: ${errToString(err)}`);
-      return undefined;
-    }
-  }
-
-  /**
-   * Закрывает браузер. Обязательно вызвать перед интерактивным логином:
-   * persistent-профиль нельзя открыть двумя контекстами одновременно.
-   */
-  async close(): Promise<void> {
-    const ctx = this.context;
-    this.context = undefined;
-    this.page = undefined;
-    this.activeSink = null;
-    if (ctx) {
-      await ctx.close().catch(() => undefined);
-    }
-  }
-
-  // ─── Private helpers ────────────────────────────────────────────────────
-
-  /**
-   * Простой мьютекс: возвращает функцию release, удерживая очередь запросов.
-   */
+  /** Simple mutex: returns the release function, queueing further requests. */
   private async acquire(): Promise<() => void> {
     let release!: () => void;
-    const prev = this.mutexChain;
+    const previous = this.mutexChain;
     this.mutexChain = new Promise<void>((resolve) => {
       release = resolve;
     });
-    await prev;
+    await previous;
     return release;
   }
 
   private async ensureContext(): Promise<BrowserContext> {
-    if (this.context) {
-      return this.context;
-    }
+    if (this.context) return this.context;
+
     const headless = this.mode === "headless";
     blog.info(`launching browser bridge (mode=${this.mode})`);
     const context = await withTimeout(
       launchQwenContext({
         headless,
         serviceWorkers: "block",
-        // headed-окно уводим за экран (Linux/Win); на macOS позиция клампится,
-        // поэтому дополнительно сворачиваем окно после загрузки (см. ensurePage).
+        // A headed window goes off-screen (Linux/Windows); macOS clamps the
+        // position, so it is additionally minimized once loaded.
         offscreen: !headless,
       }),
       LAUNCH_TIMEOUT_MS,
       "launch",
     );
-    // Стелс: маскируем признаки автоматизации/headless до загрузки страниц.
+
+    // Stealth: hide automation/headless markers before any page script runs.
     await context.addInitScript(STEALTH_INIT).catch((err) => {
       blog.warn(`addInitScript failed: ${errToString(err)}`);
     });
-    blog.info("browser bridge launched");
     context.on("close", () => {
       this.context = undefined;
       this.page = undefined;
     });
+
+    blog.info("browser bridge launched");
     this.context = context;
     return context;
   }
 
   private async ensurePage(): Promise<Page> {
-    if (this.page && !this.page.isClosed()) {
-      return this.page;
-    }
+    if (this.page && !this.page.isClosed()) return this.page;
+
     const context = await this.ensureContext();
     const page = await context.newPage();
-    blog.debug("bridge page created");
     page.on("console", (msg) => blog.debug(`[page] ${msg.text()}`));
     page.on("pageerror", (err) =>
       blog.warn(`[page error] ${errToString(err)}`),
@@ -479,16 +407,17 @@ export class QwenBrowserBridge {
     await page.exposeFunction(SINK_BINDING, (ev: SinkEvent) => {
       this.activeSink?.(ev);
     });
+
     const cleared = await this.navigateAndClearWaf(page, false);
     this.page = page;
+
     if (this.mode === "headed") {
       if (cleared) {
-        // Челлендж снят — можно свернуть окно с глаз (на macOS это надёжнее,
-        // чем off-screen; на капче revealForCaptcha его развернёт).
-        await this.minimizeWindow(page);
+        // Challenge gone — hide the window (more reliable than off-screen on
+        // macOS; revealForCaptcha brings it back when needed).
+        await this.setWindowBounds(page, { windowState: "minimized" });
       } else {
-        // Челлендж НЕ снялся (вероятно интерактивная капча на самой странице) —
-        // НЕ сворачиваем, а показываем окно, чтобы пользователь её решил.
+        // Probably an interactive captcha on the page: show it to the user.
         blog.warn("WAF challenge on page did not clear — revealing window");
         await this.revealForCaptcha();
       }
@@ -496,26 +425,10 @@ export class QwenBrowserBridge {
     return page;
   }
 
-  /** Сворачивает окно моста (headed) через CDP. */
-  private async minimizeWindow(page: Page): Promise<void> {
-    const context = this.context;
-    if (!context) return;
-    try {
-      const cdp = await context.newCDPSession(page);
-      const { windowId } = await cdp.send("Browser.getWindowForTarget");
-      await cdp.send("Browser.setWindowBounds", {
-        windowId,
-        bounds: { windowState: "minimized" },
-      });
-    } catch (err) {
-      blog.warn(`minimizeWindow failed: ${errToString(err)}`);
-    }
-  }
-
   /**
-   * Открывает/перезагружает главную и даёт JS-челленджу Aliyun WAF отработать:
-   * он вычисляет clearance-cookie и перезагружает страницу. Без этого последующие
-   * запросы снова получают HTML-челлендж вместо данных.
+   * Opens/reloads the home page and lets the Aliyun WAF JS challenge run: it
+   * computes a clearance cookie and reloads. Without it every later request
+   * gets the HTML challenge again.
    */
   private async navigateAndClearWaf(
     page: Page,
@@ -526,11 +439,12 @@ export class QwenBrowserBridge {
         .reload({ waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS })
         .catch(() => undefined);
     } else {
-      await page.goto(QWEN_HOME_URL, {
+      await page.goto(HOME_URL, {
         waitUntil: "domcontentloaded",
         timeout: NAV_TIMEOUT_MS,
       });
     }
+
     const cleared = await this.waitForWafClear(page, WAF_CLEAR_TIMEOUT_MS);
     blog.info(
       cleared
@@ -540,8 +454,11 @@ export class QwenBrowserBridge {
     return cleared;
   }
 
-  /** Ждёт исчезновения WAF-челленджа на странице. true — снят, false — таймаут. */
-  private async waitForWafClear(page: Page, timeoutMs: number): Promise<boolean> {
+  /** Waits for the WAF challenge to disappear; false on timeout. */
+  private async waitForWafClear(
+    page: Page,
+    timeoutMs: number,
+  ): Promise<boolean> {
     try {
       await page.waitForFunction(
         () => !document.querySelector('meta[name="aliyun_waf_aa"]'),
@@ -553,15 +470,84 @@ export class QwenBrowserBridge {
       return false;
     }
   }
+
+  /** Brings the hidden bridge window on screen so the captcha can be solved. */
+  private async revealForCaptcha(): Promise<void> {
+    // From a minimized window: restore to normal first, then place it.
+    await this.setWindowBounds(this.page, { windowState: "normal" });
+    await this.setWindowBounds(this.page, {
+      left: 80,
+      top: 80,
+      width: 1100,
+      height: 820,
+    });
+    await this.page?.bringToFront().catch(() => undefined);
+
+    this.notifyCaptcha?.(
+      "Qwen requires a one-time verification. Solve the captcha in the opened browser window, then send your request again.",
+    );
+  }
+
+  private async setWindowBounds(
+    page: Page | undefined,
+    bounds: Record<string, unknown>,
+  ): Promise<void> {
+    if (!page || !this.context) return;
+    try {
+      const cdp = await this.context.newCDPSession(page);
+      const { windowId } = await cdp.send("Browser.getWindowForTarget");
+      await cdp.send("Browser.setWindowBounds", { windowId, bounds });
+    } catch (err) {
+      blog.warn(`setWindowBounds failed: ${errToString(err)}`);
+    }
+  }
+}
+
+/** Headers for the in-page fetch; built here so both helpers stay identical. */
+function inPageHeaders(token: string): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
+    Accept: "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    source: "web",
+    version: WEB_VERSION,
+    "bx-v": BX_V,
+    "x-request-id": crypto.randomUUID(),
+    timezone: new Date().toString().replace(/\s*\(.*\)\s*$/, ""),
+  };
+}
+
+/** Does the body look like an Aliyun WAF challenge instead of API data? */
+function isWafHtml(text: string): boolean {
+  const head = text.slice(0, 400).toLowerCase();
+  return head.includes("aliyun_waf") || head.includes("<!doctype");
+}
+
+/** Rejects with a ProviderError after `ms`; the promise itself keeps running. */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new ProviderError(
+            PROVIDER_ID,
+            `browser bridge timeout: ${label} (${ms}ms)`,
+          ),
+        ),
+      ms,
+    );
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
 /**
- * Стелс-скрипт (context.addInitScript): маскирует типовые признаки
- * автоматизации/headless, чтобы анти-бот считал сессию доверенной и не требовал
- * капчу. Исполняется в каждом документе ДО скриптов страницы.
+ * Stealth script (context.addInitScript): hides the usual automation/headless
+ * markers so the anti-bot trusts the session. Runs in every document before the
+ * page's own scripts.
  */
 const STEALTH_INIT = () => {
-  const nav = navigator as unknown as Record<string, unknown>;
   const def = (obj: object, prop: string, value: unknown) => {
     try {
       Object.defineProperty(obj, prop, { get: () => value });
@@ -570,19 +556,18 @@ const STEALTH_INIT = () => {
     }
   };
 
+  const nav = navigator as unknown as Record<string, unknown>;
   def(nav, "webdriver", undefined);
   def(nav, "hardwareConcurrency", 8);
   def(nav, "deviceMemory", 8);
   def(nav, "languages", ["en-US", "en"]);
-  // Непустой список плагинов (у headless он пустой — явный признак).
+  // A non-empty plugin list (headless has none — a dead giveaway).
   def(nav, "plugins", [1, 2, 3, 4, 5]);
 
   const w = window as unknown as Record<string, unknown>;
-  if (!w.chrome) {
-    w.chrome = { runtime: {} };
-  }
+  w.chrome ??= { runtime: {} };
 
-  // permissions.query для notifications у headless расходится с Notification.
+  // In headless, permissions.query for notifications disagrees with Notification.
   try {
     const perms = navigator.permissions as unknown as {
       query?: (d: { name: string }) => Promise<unknown>;
@@ -590,7 +575,7 @@ const STEALTH_INIT = () => {
     const orig = perms?.query?.bind(perms);
     if (orig) {
       perms.query = (d: { name: string }) =>
-        d && d.name === "notifications"
+        d?.name === "notifications"
           ? Promise.resolve({ state: Notification.permission })
           : orig(d);
     }
@@ -598,7 +583,7 @@ const STEALTH_INIT = () => {
     /* ignore */
   }
 
-  // WebGL vendor/renderer — headless часто выдаёт SwiftShader/Google.
+  // WebGL vendor/renderer — headless often reports SwiftShader/Google.
   try {
     const proto = WebGLRenderingContext.prototype as unknown as {
       getParameter: (p: number) => unknown;
@@ -614,61 +599,31 @@ const STEALTH_INIT = () => {
   }
 };
 
-/** Похоже ли тело ответа на HTML-челлендж Aliyun WAF, а не на данные API. */
-function isWafHtml(text: string): boolean {
-  const head = text.slice(0, 400).toLowerCase();
-  return head.includes("aliyun_waf") || head.includes("<!doctype");
-}
-
 /**
- * Ограничивает промис по времени: по таймауту — ProviderError (исходный промис
- * продолжает выполняться в фоне, но мы его больше не ждём).
- */
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(
-        new ProviderError(
-          PROVIDER_ID,
-          `browser bridge timeout: ${label} (${ms}ms)`,
-        ),
-      );
-    }, ms);
-    p.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err);
-      },
-    );
-  });
-}
-
-/**
- * Тело функции, исполняемой ВНУТРИ страницы (сериализуется Playwright и
- * выполняется через CDP в обход CSP).
- * Стримит SSE обратно в Node через exposed-биндинг `sinkName`. Использует
- * `window.fetch` ГЛАВНОЙ страницы (как upstream) — чтобы запрос шёл в контексте
- * доверенной сессии/анти-бот-SDK, иначе completions отдаёт x5sec/RGV587.
+ * Runs INSIDE the page (serialized by Playwright, executed through CDP, so the
+ * CSP does not apply). Streams SSE back to Node through the exposed binding.
+ * Uses the main page's `window.fetch` on purpose: completions must run in the
+ * trusted session/anti-bot SDK context, otherwise it answers x5sec/RGV587.
  */
 const BROWSER_FETCH_FN = async (args: {
   url: string;
-  token: string;
+  headers: Record<string, string>;
   bodyJson: string;
-  referer: string;
   sinkName: string;
   idleTimeoutMs: number;
-  webVersion: string;
-  bxV: string;
 }): Promise<void> => {
   const w = window as unknown as Record<string, unknown>;
   const sink = w[args.sinkName] as (ev: SinkEvent) => Promise<void>;
+  const readText = async (resp: Response) => {
+    try {
+      return await resp.text();
+    } catch {
+      return "";
+    }
+  };
 
   const controller = new AbortController();
-  // Таймер гасит только ожидание первого ответа; после headers — снимаем.
+  // The timer only guards the wait for headers; it is cleared afterwards.
   let waitTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(
     () => controller.abort(),
     args.idleTimeoutMs,
@@ -679,30 +634,18 @@ const BROWSER_FETCH_FN = async (args: {
   try {
     resp = await window.fetch(args.url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer " + args.token,
-        Accept: "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        source: "web",
-        version: args.webVersion,
-        "bx-v": args.bxV,
-        "x-request-id": crypto.randomUUID(),
-        timezone: new Date().toString().replace(/\s*\(.*\)\s*$/, ""),
-      },
+      headers: args.headers,
       body: args.bodyJson,
       credentials: "include",
       signal: controller.signal,
     });
   } catch (e) {
-    if (waitTimer) clearTimeout(waitTimer);
+    clearTimeout(waitTimer);
     await sink({ t: "error", message: String((e as Error)?.message ?? e) });
     return;
   }
-  if (waitTimer) {
-    clearTimeout(waitTimer);
-    waitTimer = undefined;
-  }
+  clearTimeout(waitTimer);
+  waitTimer = undefined;
 
   const contentType = resp.headers.get("content-type") ?? "";
   await sink({
@@ -712,36 +655,26 @@ const BROWSER_FETCH_FN = async (args: {
     retryAfter: resp.headers.get("retry-after"),
   });
 
-  // completions обязан вернуть SSE. Не-event-stream = WAF/анти-бот (html или
-  // x5sec/RGV587 в JSON). Сигналим 'waf' — внешний код перечистит и повторит.
+  // completions must return SSE. Anything else is the WAF or an anti-bot (html,
+  // or x5sec/RGV587 in JSON). Signal 'waf' so the caller re-clears and retries.
   if (!contentType.toLowerCase().includes("text/event-stream")) {
-    let text = "";
-    try {
-      text = await resp.text();
-    } catch {
-      /* ignore */
-    }
+    const text = await readText(resp);
     if (
       contentType.toLowerCase().includes("text/html") ||
       /FAIL_SYS_USER_VALIDATE|RGV587|x5sec|_____tmd_____|\/punish/i.test(text)
     ) {
       await sink({ t: "waf" });
-      return;
+    } else {
+      await sink({
+        t: "error",
+        message: "Non-SSE " + resp.status + ": " + text.slice(0, 300),
+      });
     }
-    await sink({
-      t: "error",
-      message: "Non-SSE " + resp.status + ": " + text.slice(0, 300),
-    });
     return;
   }
 
   if (!resp.ok) {
-    let text = "";
-    try {
-      text = await resp.text();
-    } catch {
-      /* ignore */
-    }
+    const text = await readText(resp);
     await sink({
       t: "error",
       message: "HTTP " + resp.status + ": " + text.slice(0, 300),
@@ -750,15 +683,8 @@ const BROWSER_FETCH_FN = async (args: {
   }
 
   if (!resp.body) {
-    let text = "";
-    try {
-      text = await resp.text();
-    } catch {
-      /* ignore */
-    }
-    if (text) {
-      await sink({ t: "chunk", data: text });
-    }
+    const text = await readText(resp);
+    if (text) await sink({ t: "chunk", data: text });
     await sink({ t: "end" });
     return;
   }
@@ -768,10 +694,8 @@ const BROWSER_FETCH_FN = async (args: {
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      if (value && value.length) {
+      if (done) break;
+      if (value?.length) {
         await sink({
           t: "chunk",
           data: decoder.decode(value, { stream: true }),
@@ -779,57 +703,35 @@ const BROWSER_FETCH_FN = async (args: {
       }
     }
     const tail = decoder.decode();
-    if (tail) {
-      await sink({ t: "chunk", data: tail });
-    }
+    if (tail) await sink({ t: "chunk", data: tail });
     await sink({ t: "end" });
   } catch (e) {
     await sink({ t: "error", message: String((e as Error)?.message ?? e) });
   }
 };
 
-/**
- * In-page POST c буферизованным JSON-ответом (чистый fetch из iframe).
- */
+/** In-page POST with a buffered JSON answer, using a clean iframe fetch. */
 const BROWSER_JSON_FN = async (args: {
   url: string;
-  token: string;
+  headers: Record<string, string>;
   bodyJson: string;
   timeoutMs: number;
-  webVersion: string;
-  bxV: string;
 }): Promise<{ ok: boolean; status: number; text: string }> => {
   const frame = document.createElement("iframe");
   frame.style.display = "none";
   frame.src = "about:blank";
   document.documentElement.appendChild(frame);
+
   const cw = frame.contentWindow as (Window & typeof globalThis) | null;
   const cleanFetch = (cw?.fetch ?? window.fetch).bind(cw ?? window);
   const CleanAbort = cw?.AbortController ?? AbortController;
-  const cleanupFrame = () => {
-    try {
-      frame.remove();
-    } catch {
-      /* ignore */
-    }
-  };
 
   const controller = new CleanAbort();
   const timer = setTimeout(() => controller.abort(), args.timeoutMs);
   try {
     const resp = await cleanFetch(args.url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer " + args.token,
-        Accept: "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        source: "web",
-        version: args.webVersion,
-        "bx-v": args.bxV,
-        "x-request-id": crypto.randomUUID(),
-        timezone: new Date().toString().replace(/\s*\(.*\)\s*$/, ""),
-      },
+      headers: args.headers,
       body: args.bodyJson,
       credentials: "include",
       signal: controller.signal,
@@ -845,6 +747,10 @@ const BROWSER_JSON_FN = async (args: {
     return { ok: false, status: 0, text: String((e as Error)?.message ?? e) };
   } finally {
     clearTimeout(timer);
-    cleanupFrame();
+    try {
+      frame.remove();
+    } catch {
+      /* ignore */
+    }
   }
 };

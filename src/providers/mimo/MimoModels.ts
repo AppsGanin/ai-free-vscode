@@ -1,20 +1,16 @@
-import { createProviderModelIdResolver } from "../common/ModelIdResolver";
+import { aliasResolver } from "../common/models";
 import type { AIModelInfo } from "../types";
 
-/**
- * Маршрут модели в терминах mimocode: `providerID/modelID`
- * (именно так CLI печатает их в `mimo models`).
- */
+/** Model route as mimocode names it (`mimo models` prints `providerID/modelID`). */
 export interface MimoModelRoute {
   providerID: string;
   modelID: string;
 }
 
 /**
- * Только бесплатный анонимный канал MiMo Auto: он не требует ни ключа, ни входа.
- * Платные `xiaomi/*` намеренно не показываем — для них нужен аккаунт MiMo.
- *
- * Лимиты взяты из ответа `GET /config/providers` локального mimocode-сервера.
+ * Only the free anonymous MiMo Auto channel — no key, no sign-in. Paid
+ * `xiaomi/*` routes are hidden on purpose: they need a MiMo account.
+ * Limits come from the local server's `GET /config/providers`.
  */
 export const MIMO_MODELS: AIModelInfo[] = [
   {
@@ -36,39 +32,24 @@ export const MIMO_MODELS: AIModelInfo[] = [
   },
 ];
 
-/** Наш ID модели → маршрут mimocode. */
-export const MIMO_MODEL_ROUTES: Record<string, MimoModelRoute> = {
+const MIMO_MODEL_ROUTES: Record<string, MimoModelRoute> = {
   "mimo-auto": { providerID: "mimo", modelID: "mimo-auto" },
 };
 
-/** Алиасы: короткое имя → канонический ID */
-export const MIMO_MODEL_ALIASES: Record<string, string> = {
+export const resolveMimoModelId = aliasResolver({
   mimo: "mimo-auto",
   default: "mimo-auto",
   auto: "mimo-auto",
-};
-
-const MIMO_MODEL_ID_RESOLVER = createProviderModelIdResolver({
-  aliases: MIMO_MODEL_ALIASES,
 });
 
-/** Разрешает алиас в канонический ID модели */
-export function resolveMimoModelId(id: string): string {
-  return MIMO_MODEL_ID_RESOLVER.resolveModelId(id);
-}
-
-/** Маршрут `providerID/modelID` для нашего ID модели. */
 export function getMimoRoute(id: string): MimoModelRoute | undefined {
   return MIMO_MODEL_ROUTES[resolveMimoModelId(id)];
 }
 
-/** `providerID/modelID` → наш ID модели (для фильтрации по выводу `mimo models`). */
+/** `providerID/modelID` → our model id (filters the `mimo models` output). */
 export function findModelIdByRoute(route: string): string | undefined {
   const normalized = route.trim().toLowerCase();
-  for (const [modelId, r] of Object.entries(MIMO_MODEL_ROUTES)) {
-    if (`${r.providerID}/${r.modelID}`.toLowerCase() === normalized) {
-      return modelId;
-    }
-  }
-  return undefined;
+  return Object.entries(MIMO_MODEL_ROUTES).find(
+    ([, r]) => `${r.providerID}/${r.modelID}`.toLowerCase() === normalized,
+  )?.[0];
 }

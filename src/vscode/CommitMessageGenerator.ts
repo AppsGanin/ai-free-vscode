@@ -2,12 +2,11 @@ import * as vscode from "vscode";
 import { log } from "../logger";
 import {
   COMMIT_FEATURE,
-  promptNoModels,
   resolveFeatureModel,
   selectFeatureModel,
 } from "./ModelPicker";
+import { VENDOR, promptSignIn, stripCodeFences } from "./util";
 
-const VENDOR = "free-ai-vscode";
 const MAX_DIFF_CHARS = 16000;
 
 const DEFAULT_PROMPT = [
@@ -20,7 +19,7 @@ const DEFAULT_PROMPT = [
   "- Reply with ONLY the commit message text: no markdown fences, no quotes, no explanations.",
 ].join("\n");
 
-// ─── Минимальный тип API встроенного git-расширения VS Code ────────────────
+// ─── Minimal surface of the built-in git extension API ──────────────────────
 interface GitRepository {
   readonly rootUri: vscode.Uri;
   readonly inputBox: { value: string };
@@ -45,9 +44,6 @@ export function registerCommitMessageCommands(
       `${VENDOR}.generateCommitMessage`,
       (scmArg?: unknown) => generateCommitMessage(scmArg),
     ),
-  );
-
-  context.subscriptions.push(
     vscode.commands.registerCommand(`${VENDOR}.selectCommitModel`, () =>
       selectFeatureModel(COMMIT_FEATURE),
     ),
@@ -56,15 +52,10 @@ export function registerCommitMessageCommands(
 
 async function getGitApi(): Promise<GitAPI | undefined> {
   const ext = vscode.extensions.getExtension<GitExtension>("vscode.git");
-  if (!ext) {
-    return undefined;
-  }
+  if (!ext) return undefined;
   try {
     const exports = ext.isActive ? ext.exports : await ext.activate();
-    if (!exports?.enabled) {
-      return undefined;
-    }
-    return exports.getAPI(1);
+    return exports?.enabled ? exports.getAPI(1) : undefined;
   } catch {
     return undefined;
   }
@@ -74,52 +65,28 @@ function resolveRepository(
   api: GitAPI,
   scmArg?: unknown,
 ): GitRepository | undefined {
-  // Команда из меню scm/inputBox получает SourceControl с rootUri.
+  // Invoked from the scm/inputBox menu we get a SourceControl with a rootUri.
   const rootUri = (scmArg as { rootUri?: vscode.Uri } | undefined)?.rootUri;
   if (rootUri) {
     const matched =
       api.getRepository(rootUri) ??
-      api.repositories.find(
-        (r) => r.rootUri.toString() === rootUri.toString(),
-      );
-    if (matched) {
-      return matched;
-    }
+      api.repositories.find((r) => r.rootUri.toString() === rootUri.toString());
+    if (matched) return matched;
   }
-
-  if (api.repositories.length === 1) {
-    return api.repositories[0];
-  }
-
-  // Несколько репозиториев и не удалось сопоставить — берём первый.
   return api.repositories[0];
 }
 
 function cleanCommitMessage(raw: string): string {
-  let text = raw.trim();
-
-  // Снимаем возможные markdown-ограждения ```...```.
-  const fenced = text.match(/^```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)\n```$/);
-  if (fenced) {
-    text = fenced[1].trim();
-  }
-
-  // Снимаем обрамляющие кавычки, если модель обернула всё сообщение.
-  if (
+  const text = stripCodeFences(raw.trim()).trim();
+  const quoted =
     (text.startsWith('"') && text.endsWith('"')) ||
-    (text.startsWith("`") && text.endsWith("`"))
-  ) {
-    text = text.slice(1, -1).trim();
-  }
-
-  return text;
+    (text.startsWith("`") && text.endsWith("`"));
+  return quoted ? text.slice(1, -1).trim() : text;
 }
 
 async function generateCommitMessage(scmArg?: unknown): Promise<void> {
-  const enabled = vscode.workspace
-    .getConfiguration("freeAI")
-    .get<boolean>("commit.enabled", true);
-  if (!enabled) {
+  const config = vscode.workspace.getConfiguration("freeAI");
+  if (!config.get<boolean>("commit.enabled", true)) {
     vscode.window.showInformationMessage(
       "Commit message generation is disabled (freeAI.commit.enabled).",
     );
@@ -142,11 +109,11 @@ async function generateCommitMessage(scmArg?: unknown): Promise<void> {
 
   let diff = "";
   try {
+    // Staged changes first; fall back to the working tree.
     const staged = (await repo.diff(true)) ?? "";
-    diff = staged.trim() ? staged : (await repo.diff(false)) ?? "";
+    diff = staged.trim() ? staged : ((await repo.diff(false)) ?? "");
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    vscode.window.showErrorMessage(`Failed to get git diff: ${msg}`);
+    vscode.window.showErrorMessage(`Failed to get git diff: ${message(err)}`);
     return;
   }
 
@@ -159,24 +126,23 @@ async function generateCommitMessage(scmArg?: unknown): Promise<void> {
 
   const model = await resolveFeatureModel(COMMIT_FEATURE);
   if (!model) {
-    await promptNoModels();
+    await promptSignIn();
     return;
   }
 
-  let boundedDiff = diff;
-  if (boundedDiff.length > MAX_DIFF_CHARS) {
-    boundedDiff = `${boundedDiff.slice(0, MAX_DIFF_CHARS)}\n\n[diff truncated: showing first ${MAX_DIFF_CHARS} chars]`;
+  if (diff.length > MAX_DIFF_CHARS) {
+    diff = `${diff.slice(0, MAX_DIFF_CHARS)}\n\n[diff truncated: showing first ${MAX_DIFF_CHARS} chars]`;
   }
 
-  const instructions = String(
-    vscode.workspace
-      .getConfiguration("freeAI.commit")
-      .get("prompt", DEFAULT_PROMPT),
-  ).trim();
+  const instructions =
+    String(
+      vscode.workspace
+        .getConfiguration("freeAI.commit")
+        .get("prompt", DEFAULT_PROMPT),
+    ).trim() || DEFAULT_PROMPT;
+  const userPrompt = `${instructions}\n\n=== git diff ===\n${diff}`;
 
-  const userPrompt = `${instructions || DEFAULT_PROMPT}\n\n=== git diff ===\n${boundedDiff}`;
-
-  // Сохраняем то, что пользователь уже мог напечатать, чтобы вернуть при отмене.
+  // Keep whatever the user already typed, to restore it on cancel or failure.
   const previousValue = repo.inputBox.value;
 
   await vscode.window.withProgress(
@@ -187,20 +153,18 @@ async function generateCommitMessage(scmArg?: unknown): Promise<void> {
     },
     async (_progress, token) => {
       try {
+        // Reasoning only adds latency for commit messages.
         const response = model.sendText(
           [userPrompt],
-          // Reasoning не нужен для коммитов — только добавляет задержку.
           { thinkingMode: "off" },
           token,
         );
 
         let acc = "";
         for await (const part of response) {
-          if (token.isCancellationRequested) {
-            break;
-          }
+          if (token.isCancellationRequested) break;
           acc += part;
-          // Живой предпросмотр прямо в поле ввода коммита.
+          // Live preview straight in the commit input box.
           repo.inputBox.value = cleanCommitMessage(acc);
         }
 
@@ -211,23 +175,25 @@ async function generateCommitMessage(scmArg?: unknown): Promise<void> {
 
         const finalMessage = cleanCommitMessage(acc);
         repo.inputBox.value = finalMessage || previousValue;
-
         if (!finalMessage) {
           vscode.window.showWarningMessage(
             "The model returned an empty commit message.",
           );
         }
         log(
-          `[commit] generated message model=${model.id} chars=${finalMessage.length}`,
+          `[commit] generated model=${model.id} chars=${finalMessage.length}`,
         );
       } catch (err) {
         repo.inputBox.value = previousValue;
-        const msg = err instanceof Error ? err.message : String(err);
-        log(`[commit] generation error: ${msg}`);
+        log(`[commit] generation error: ${message(err)}`);
         vscode.window.showErrorMessage(
-          `Failed to generate commit message: ${msg}`,
+          `Failed to generate commit message: ${message(err)}`,
         );
       }
     },
   );
+}
+
+function message(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

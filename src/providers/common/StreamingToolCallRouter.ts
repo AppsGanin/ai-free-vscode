@@ -1,40 +1,46 @@
+import type { AIStreamChunk } from "../types";
 import {
   findToolCallMarkerStart,
   looksLikeToolCallStart,
   parseToolCallsFromText,
-  stripInlineToolCallJson,
+  stripToolCallBlocks,
 } from "./ToolCalling";
-import type { AIStreamChunk } from "../types";
 
-// Длина hold-буфера, после которой непохожий на tool_call текст сбрасываем как
-// обычный текст (ложное срабатывание маркера на markdown/коде).
-const MAX_TOOLCALL_HOLD_BUFFER_CHARS = 4096;
-// Жёсткий предел для подтверждённых tool_call (большие аргументы вроде целого
-// файла): держим до этого размера, прежде чем сдаться.
-const MAX_TOOLCALL_HARD_CAP_CHARS = 262144;
-// Сколько последних символов придерживаем, чтобы поймать частичный маркер на
-// границе чанков (длина "```tool_call" минус 1).
-const TOOL_MARKER_HOLDBACK_CHARS = 11;
+// Held text that stops looking like a tool call is released as plain text
+// (false marker hit on markdown/code).
+const MAX_HOLD_CHARS = 4096;
+// Hard cap for confirmed calls with huge arguments (a whole file).
+const MAX_HOLD_HARD_CAP_CHARS = 262144;
+// Tail kept back to catch a marker split across chunks (len("```tool_call") - 1).
+const MARKER_HOLDBACK_CHARS = 11;
 
-// Маркеры фейкового СЛЕДУЮЩЕГО хода диалога, которые маленькие модели дописывают
-// после своего ответа: они «доигрывают» склеенный транскрипт и эхом повторяют
-// ролевые префиксы (`User:`/`Assistant:`) и наш плейсхолдер результата
-// инструмента (`[Tool result id=...]`). Привязка к началу строки и очень
-// специфичный `[tool result id=` минимизируют ложные срезы легитимного текста.
-// Общий для всех провайдеров (Qwen/DeepSeek/Kimi склеивают диалог похоже).
-const TRANSCRIPT_CUT_PATTERN =
-  /(?:\n|^)[ \t]*(?:user|assistant)[ \t]*:|\[tool result id=/i;
-// Длина hold-буфера для ловли частичной границы на стыке чанков
-// (len("[Tool result id=") - 1).
+// Small models "play out" the joined transcript after their answer, echoing the
+// role prefixes, our tool-result placeholder, or a whole tool result with its
+// call id. Anchoring to line starts and to very specific markers keeps false
+// cuts unlikely. Shared by all providers — Qwen/DeepSeek/Kimi/MiMo all join the
+// dialog the same way.
+const TRANSCRIPT_CUT_PATTERN = new RegExp(
+  [
+    // `\nUser:` / `\nAssistant:` at the start of a line
+    "(?:\\n|^)[ \\t]*(?:user|assistant)[ \\t]*:",
+    // our own placeholder
+    "\\[tool result id=",
+    // a call id echoed anywhere, e.g. `Environment: [toolu_bdrk_018gnVobT…]`
+    "\\[(?:toolu|call|tooluse)_[\\w-]{6,}",
+  ].join("|"),
+  "i",
+);
+// Longest marker prefix worth holding back: len("[Tool result id=") - 1.
 const TRANSCRIPT_CUT_HOLDBACK_CHARS = 15;
+// A cut drops the whole line its marker sits on, so the current partial line is
+// held back too — otherwise a label like `Environment: ` is already in the chat
+// by the time the marker arrives. Bounded, so a long paragraph still streams.
+const TRANSCRIPT_CUT_LINE_HOLDBACK_CHARS = 200;
 
 /**
- * Закрывающие теги протокола без пары. Модель роняет их в поток отдельно от
- * вызова (или после уже разобранного), а открывающего маркера рядом нет —
- * значит, hold-буфер их не удержит и они утекут в чат как обычный текст.
+ * Unpaired closing tags. The model drops them into the stream away from the
+ * call itself, so no opening marker holds them back and they leak into the chat.
  */
-const STRAY_CLOSE_TAG_RE =
-  /<\/(?:tool_call|function|parameter|tool_name|tool_arguments)>[ \t]*\n?/gi;
 const STRAY_CLOSE_TAGS = [
   "</tool_call>",
   "</function>",
@@ -42,17 +48,10 @@ const STRAY_CLOSE_TAGS = [
   "</tool_name>",
   "</tool_arguments>",
 ];
+const STRAY_CLOSE_TAG_RE =
+  /<\/(?:tool_call|function|parameter|tool_name|tool_arguments)>[ \t]*\n?/gi;
 
-function stripStrayCloseTags(text: string): string {
-  if (!text || !text.includes("</")) return text;
-  return text.replace(STRAY_CLOSE_TAG_RE, "");
-}
-
-/**
- * Длина хвоста, который выглядит началом закрывающего тега (`<`, `</`, `</too`…).
- * Такой хвост нельзя отдавать сразу: тег разорван границей чанка, и в чате его
- * половинки склеятся обратно в видимый `</tool_call>`.
- */
+/** Length of a tail that looks like the start of a closing tag (`<`, `</too`…). */
 function trailingCloseTagPrefixLen(text: string): number {
   let longest = 0;
   for (const tag of STRAY_CLOSE_TAGS) {
@@ -72,10 +71,9 @@ export function stripDanglingToolCallMarkers(text: string): string {
       .replace(/```tool_call\s*```?/gi, "")
       .replace(/```tool_call\s*$/gim, "")
       .replace(/^\s*```tool_call\s*\n?/gim, "")
-      .replace(/^\s*<tool_call>\s*$/gim, "")
-      // Осиротевшие теги XML-протокола MiMo/Qwen-Coder: модель регулярно теряет
-      // открывающий или закрывающий тег, и без этого они видны в чате.
-      .replace(/<\/?tool_call>/gi, "")
+      .replace(/^\s*<tool_call\b[^>]*>\s*$/gim, "")
+      // Orphaned MiMo/Qwen-Coder XML tags: the model regularly loses one side.
+      .replace(/<tool_call\b[^>]*>|<\/tool_call>/gi, "")
       .replace(/<function\s*=\s*[\w.:-]+\s*>|<\/function>/gi, "")
       .replace(/<parameter\s*=\s*[\w.:-]+\s*>|<\/parameter>/gi, "")
       .replace(/<\/?tool_name>|<\/?tool_arguments>/gi, "")
@@ -83,44 +81,41 @@ export function stripDanglingToolCallMarkers(text: string): string {
   );
 }
 
-function sanitizeProtocolTranscript(text: string): string {
+/**
+ * Cleans the held region once a call was (or was not) extracted from it.
+ * Runs on the raw buffer, before the tags are stripped: whole blocks can only
+ * be matched while their opening tag is still there.
+ */
+function sanitizeHoldRemainder(text: string): string {
   if (!text) return "";
-
-  let sanitized = text;
-  sanitized = sanitized.replace(/```tool_call[\s\S]*?```/gi, "\n\n");
-  sanitized = sanitized.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "\n\n");
-  // Полный XML-вызов MiMo/Qwen-Coder (даже без обёртки <tool_call>).
-  sanitized = sanitized.replace(
-    /<function\s*=\s*[\w.:-]+\s*>[\s\S]*?<\/function>/gi,
-    "\n\n",
+  return (
+    stripToolCallBlocks(text)
+      // `<tool_call name="x">{…}` — the arguments carry no `name` of their own,
+      // so nothing else would recognise them as protocol. Closing tag optional.
+      .replace(/<tool_call\b[^>]*>[\s\S]*?(?:<\/tool_call>|$)/gi, "\n\n")
+      .replace(/<function\s*=\s*[\w.:-]+\s*>[\s\S]*?<\/function>/gi, "\n\n")
+      .replace(
+        /<tool_name>[\s\S]*?<\/tool_name>(\s*<tool_arguments>[\s\S]*?<\/tool_arguments>)?/gi,
+        "\n\n",
+      )
+      .replace(/^\s*Assistant:\s?/gim, "")
+      .replace(/```[a-zA-Z0-9_-]*\s*\n\s*```/g, "\n")
+      // Orphaned fences left behind by the removals above; safe here because
+      // this only ever runs on a hold region, never on normal prose.
+      .replace(/```[a-zA-Z0-9_-]*/g, "")
+      .replace(/[ \t]{2,}/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
   );
-  // Пара <tool_name>…</tool_name><tool_arguments>…</tool_arguments>.
-  sanitized = sanitized.replace(
-    /<tool_name>[\s\S]*?<\/tool_name>(\s*<tool_arguments>[\s\S]*?<\/tool_arguments>)?/gi,
-    "\n\n",
-  );
-  sanitized = stripInlineToolCallJson(sanitized);
-  sanitized = sanitized.replace(/^\s*Assistant:\s?/gim, "");
-  sanitized = sanitized.replace(/```[a-zA-Z0-9_-]*\s*\n\s*```/g, "\n");
-  // Осиротевшие fence-маркеры (```), оставшиеся после вырезания tool_call JSON.
-  // Применяется только к hold-региону tool_call, поэтому удаляем любые ``` —
-  // иначе одиночный закрывающий фенс рендерится как пустой блок кода.
-  sanitized = sanitized.replace(/```[a-zA-Z0-9_-]*/g, "");
-  sanitized = sanitized.replace(/[ \t]{2,}/g, " ");
-  sanitized = sanitized.replace(/\n{3,}/g, "\n\n");
-  return sanitized;
 }
 
 /**
- * Маршрутизатор текстового потока в text/tool_call чанки.
+ * Routes a text stream into text / tool_call chunks.
  *
- * Web-модели (DeepSeek/Qwen/Kimi) не присылают нативные tool_calls — они
- * печатают вызов инструмента прямо в тексте (```tool_call ... ```). Этот класс
- * скользящим окном ловит начало маркера, придерживает потенциальный вызов до
- * конца стрима и затем парсит его в tool_call, не давая «протечь» сырому
- * протоколу в чат.
+ * Web models (DeepSeek/Qwen/Kimi/MiMo) have no native tool_calls — they print
+ * the call into the answer (```tool_call … ```). This class spots the marker
+ * with a sliding window, holds the candidate until the stream ends and then
+ * parses it, so the raw protocol never reaches the chat.
  *
- * Используется так:
  *   for (...) yield* router.route(textChunk);
  *   yield* router.finish();
  */
@@ -136,59 +131,56 @@ export class StreamingToolCallRouter {
     private readonly allowToolCalls: boolean,
     private readonly logger?: (msg: string) => void,
     private readonly logPrefix = "",
-    // null отключает транскрипт-страж (по умолчанию включён для всех провайдеров).
-    private readonly cutPattern: RegExp | null = TRANSCRIPT_CUT_PATTERN,
-    private readonly cutHoldback = TRANSCRIPT_CUT_HOLDBACK_CHARS,
   ) {}
 
   /**
-   * true, если роутер сейчас придерживает потенциальный tool_call (виден маркер,
-   * но вызов ещё не дописан). Нужно вызывающему, чтобы не обрывать стрим
-   * преждевременно, пока формируется вызов.
+   * True while a potential tool call is held (marker seen, call not finished).
+   * Callers use it to avoid cutting the stream mid-call.
    */
   get holding(): boolean {
     return this.holdActive;
   }
 
   /**
-   * true, если в потоке распознана граница фейкового следующего хода и остаток
-   * ответа отбрасывается. Вызывающему стоит остановить апстрим (reader.cancel),
-   * чтобы модель не жгла токены на «доигрывание» диалога.
+   * True once a fabricated next turn was detected and the rest is dropped. The
+   * caller should stop the upstream so the model stops burning tokens.
    */
   get cut(): boolean {
     return this.cutActive;
   }
 
   /**
-   * Транскрипт-страж: ловит границу фейкового следующего хода, отдаёт текст до
-   * неё и отбрасывает всё после. Holdback придерживает хвост, чтобы префикс
-   * границы не утёк до распознавания. Безопасный текст уходит в routeSafe.
+   * Transcript guard: emits text up to the fabricated turn and discards the
+   * rest. The holdback keeps a tail so a split boundary is not missed.
    */
   *route(rawText: string): Iterable<AIStreamChunk> {
-    if (!rawText) {
-      return;
-    }
-    if (this.cutActive) {
-      return;
-    }
-    if (!this.cutPattern) {
-      yield* this.routeSafe(rawText);
+    if (!rawText || this.cutActive) {
       return;
     }
 
     this.cutBuffer += rawText;
-    const match = this.cutPattern.exec(this.cutBuffer);
+    const match = TRANSCRIPT_CUT_PATTERN.exec(this.cutBuffer);
     if (match) {
       this.cutActive = true;
-      const safe = this.cutBuffer.slice(0, match.index).replace(/\s+$/, "");
+      // Drop the whole line the marker sits on: a label in front of it
+      // (`Environment: [toolu_…]`) belongs to the echo, not to the answer.
+      const lineStart = this.cutBuffer.lastIndexOf("\n", match.index) + 1;
+      const safe = this.cutBuffer.slice(0, lineStart).replace(/\s+$/, "");
       this.cutBuffer = "";
-      if (safe) {
-        yield* this.routeSafe(safe);
-      }
+      if (safe) yield* this.routeSafe(safe);
       return;
     }
 
-    const emitUpTo = Math.max(0, this.cutBuffer.length - this.cutHoldback);
+    const lineStart = this.cutBuffer.lastIndexOf("\n") + 1;
+    const holdback = Math.max(
+      TRANSCRIPT_CUT_HOLDBACK_CHARS,
+      Math.min(
+        this.cutBuffer.length - lineStart,
+        TRANSCRIPT_CUT_LINE_HOLDBACK_CHARS,
+      ),
+    );
+
+    const emitUpTo = this.cutBuffer.length - holdback;
     if (emitUpTo <= 0) {
       return;
     }
@@ -197,40 +189,62 @@ export class StreamingToolCallRouter {
     yield* this.routeSafe(safe);
   }
 
-  /**
-   * Единая точка выдачи текста: срезает осиротевшие закрывающие теги протокола.
-   * Открывающего маркера у них нет, поэтому hold-буфер их не ловит, и без этой
-   * очистки `</tool_call>` уходит прямо в чат.
-   */
-  private *emitText(text: string): Iterable<AIStreamChunk> {
-    let content = stripStrayCloseTags(this.closeTagTail + text);
-    this.closeTagTail = "";
+  /** Flushes the buffers: parses a tool call, or emits the tail as text. */
+  *finish(): Iterable<AIStreamChunk> {
+    yield* this.flushCutTail();
+    const { holdBuffer, tailText } = this.takeBuffers();
 
-    const partial = trailingCloseTagPrefixLen(content);
-    if (partial > 0) {
-      this.closeTagTail = content.slice(content.length - partial);
-      content = content.slice(0, content.length - partial);
+    if (holdBuffer) {
+      const toolChunks = Array.from(
+        parseToolCallsFromText(holdBuffer, {
+          logger: this.logger,
+          logPrefix: this.logPrefix,
+        }),
+      ).filter((c) => c.type === "tool_call");
+      const remainder = stripDanglingToolCallMarkers(
+        sanitizeHoldRemainder(holdBuffer),
+      );
+
+      if (toolChunks.length > 0) {
+        yield* toolChunks;
+        if (remainder.trim()) yield* this.emitText(remainder);
+      } else {
+        yield* this.emitText(remainder || holdBuffer.trim());
+      }
     }
 
-    if (content) {
-      yield { type: "text", content };
-    }
+    if (tailText) yield* this.emitText(tailText);
+    yield* this.flushCloseTagTail();
   }
 
-  /** Отдаёт недособранный хвост тега в конце ответа (полным тегом он уже не станет). */
-  private *flushCloseTagTail(): Iterable<AIStreamChunk> {
-    const tail = this.closeTagTail;
-    this.closeTagTail = "";
-    if (tail) {
-      yield { type: "text", content: tail };
+  /**
+   * Flushes everything as text without parsing. Used when the calls already
+   * arrived through another channel (native tool_calls) and the held text must
+   * not turn into a duplicate.
+   */
+  *finishAsText(): Iterable<AIStreamChunk> {
+    yield* this.flushCutTail();
+    const { holdBuffer, tailText } = this.takeBuffers();
+
+    if (holdBuffer) {
+      yield* this.emitText(
+        stripDanglingToolCallMarkers(sanitizeHoldRemainder(holdBuffer)),
+      );
     }
+    if (tailText) yield* this.emitText(tailText);
+    yield* this.flushCloseTagTail();
+  }
+
+  private takeBuffers(): { holdBuffer: string; tailText: string } {
+    const holdBuffer = this.holdActive ? this.holdBuffer : "";
+    const tailText = this.holdActive ? "" : this.pendingBuffer;
+    this.pendingBuffer = "";
+    this.holdBuffer = "";
+    this.holdActive = false;
+    return { holdBuffer, tailText };
   }
 
   private *routeSafe(rawText: string): Iterable<AIStreamChunk> {
-    if (!rawText) {
-      return;
-    }
-
     if (!this.allowToolCalls) {
       yield* this.emitText(rawText);
       return;
@@ -238,12 +252,12 @@ export class StreamingToolCallRouter {
 
     if (this.holdActive) {
       this.holdBuffer += rawText;
-      const realToolCall = looksLikeToolCallStart(this.holdBuffer);
-      const overSoftLimit =
-        this.holdBuffer.length >= MAX_TOOLCALL_HOLD_BUFFER_CHARS;
-      const overHardCap =
-        this.holdBuffer.length >= MAX_TOOLCALL_HARD_CAP_CHARS;
-      if ((overSoftLimit && !realToolCall) || overHardCap) {
+      const overSoftLimit = this.holdBuffer.length >= MAX_HOLD_CHARS;
+      const overHardCap = this.holdBuffer.length >= MAX_HOLD_HARD_CAP_CHARS;
+      if (
+        (overSoftLimit && !looksLikeToolCallStart(this.holdBuffer)) ||
+        overHardCap
+      ) {
         yield* this.emitText(stripDanglingToolCallMarkers(this.holdBuffer));
         this.holdBuffer = "";
         this.holdActive = false;
@@ -259,103 +273,44 @@ export class StreamingToolCallRouter {
       this.holdBuffer = this.pendingBuffer.slice(markerIdx);
       this.pendingBuffer = "";
       this.holdActive = true;
-    } else if (this.pendingBuffer.length > TOOL_MARKER_HOLDBACK_CHARS) {
-      yield* this.emitText(
-        this.pendingBuffer.slice(
-          0,
-          this.pendingBuffer.length - TOOL_MARKER_HOLDBACK_CHARS,
-        ),
-      );
-      this.pendingBuffer = this.pendingBuffer.slice(
-        this.pendingBuffer.length - TOOL_MARKER_HOLDBACK_CHARS,
-      );
+      return;
+    }
+
+    const emitUpTo = this.pendingBuffer.length - MARKER_HOLDBACK_CHARS;
+    if (emitUpTo > 0) {
+      yield* this.emitText(this.pendingBuffer.slice(0, emitUpTo));
+      this.pendingBuffer = this.pendingBuffer.slice(emitUpTo);
     }
   }
 
-  /**
-   * Отдаёт удержанный holdback'ом хвост транскрипт-стража через routeSafe (если
-   * границу так и не встретили). После обрыва (cutActive) буфер уже пуст.
-   */
+  /** Single exit for text: strips orphaned closing tags of the protocol. */
+  private *emitText(text: string): Iterable<AIStreamChunk> {
+    let content = (this.closeTagTail + text).replace(STRAY_CLOSE_TAG_RE, "");
+    this.closeTagTail = "";
+
+    // A tag split across chunks must not be emitted in halves — the chat would
+    // glue them back into a visible `</tool_call>`.
+    const partial = trailingCloseTagPrefixLen(content);
+    if (partial > 0) {
+      this.closeTagTail = content.slice(content.length - partial);
+      content = content.slice(0, content.length - partial);
+    }
+
+    if (content) yield { type: "text", content };
+  }
+
+  private *flushCloseTagTail(): Iterable<AIStreamChunk> {
+    const tail = this.closeTagTail;
+    this.closeTagTail = "";
+    if (tail) yield { type: "text", content: tail };
+  }
+
+  /** Releases the guard holdback when no boundary ever showed up. */
   private *flushCutTail(): Iterable<AIStreamChunk> {
     if (this.cutBuffer && !this.cutActive) {
       const tail = this.cutBuffer;
       this.cutBuffer = "";
       yield* this.routeSafe(tail);
     }
-  }
-
-  /** Сбрасывает остаток буфера: парсит tool_call либо отдаёт текст. */
-  *finish(): Iterable<AIStreamChunk> {
-    yield* this.flushCutTail();
-
-    if (!this.allowToolCalls) {
-      if (this.pendingBuffer) {
-        const tail = this.pendingBuffer;
-        this.pendingBuffer = "";
-        yield* this.emitText(tail);
-      }
-      return;
-    }
-
-    const holdBuffer = this.holdActive ? this.holdBuffer : "";
-    const tailText = this.holdActive ? "" : this.pendingBuffer;
-    this.pendingBuffer = "";
-    this.holdBuffer = "";
-    this.holdActive = false;
-
-    if (holdBuffer) {
-      const parsedChunks = Array.from(
-        parseToolCallsFromText(holdBuffer, {
-          logger: this.logger,
-          logPrefix: this.logPrefix,
-        }),
-      );
-      const toolChunks = parsedChunks.filter((c) => c.type === "tool_call");
-      const sanitizedRemainder = sanitizeProtocolTranscript(
-        stripDanglingToolCallMarkers(holdBuffer),
-      );
-
-      if (toolChunks.length > 0) {
-        for (const chunk of toolChunks) {
-          yield chunk;
-        }
-        if (sanitizedRemainder.trim()) {
-          yield* this.emitText(sanitizedRemainder);
-        }
-      } else {
-        yield* this.emitText(sanitizedRemainder || holdBuffer.trim());
-      }
-    }
-
-    if (tailText) {
-      yield* this.emitText(tailText);
-    }
-    yield* this.flushCloseTagTail();
-  }
-
-  /**
-   * Сбрасывает остаток буфера ТОЛЬКО как текст, без парсинга tool_call. Нужно,
-   * когда вызовы инструментов уже получены другим каналом (нативные tool_calls),
-   * и удержанный текст не должен превратиться в дублирующий вызов.
-   */
-  *finishAsText(): Iterable<AIStreamChunk> {
-    yield* this.flushCutTail();
-
-    const holdBuffer = this.holdActive ? this.holdBuffer : "";
-    const tailText = this.holdActive ? "" : this.pendingBuffer;
-    this.pendingBuffer = "";
-    this.holdBuffer = "";
-    this.holdActive = false;
-
-    if (holdBuffer) {
-      const sanitized = sanitizeProtocolTranscript(
-        stripDanglingToolCallMarkers(holdBuffer),
-      );
-      yield* this.emitText(sanitized);
-    }
-    if (tailText) {
-      yield* this.emitText(tailText);
-    }
-    yield* this.flushCloseTagTail();
   }
 }

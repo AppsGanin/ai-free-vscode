@@ -1,5 +1,5 @@
-import { randomBytes } from "crypto";
 import { ChildProcess, spawn } from "child_process";
+import { randomBytes } from "crypto";
 import { createLogger, errToString } from "../../logger";
 import { ProviderError } from "../types";
 import { cliEnv, mimoWorkDir, resolveMimoBinary } from "./MimoCli";
@@ -8,23 +8,17 @@ const slog = createLogger("mimo-server");
 
 const PROVIDER_ID = "ai-free-vscode-mimo";
 const STARTUP_TIMEOUT_MS = 60000;
-/** Через сколько простоя гасим сервер, чтобы не держать процесс зря. */
+/** Idle time after which the server is stopped rather than kept around. */
 const IDLE_SHUTDOWN_MS = 10 * 60 * 1000;
-/** Сколько ждём уборку сессий перед убийством процесса сервера. */
+/** How long session cleanup may take before the process is killed anyway. */
 const STOP_GRACE_MS = 3000;
-
-const delay = (ms: number) =>
-  new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    timer.unref?.();
-  });
 
 const AGENT_NAME = "free-ai-vscode-chat";
 
 /**
- * Системный промпт агента-моста. Инструменты у агента выключены полностью:
- * всю агентную работу (чтение файлов, правки, tool calls) ведёт Copilot Chat,
- * mimocode тут — только транспорт до модели.
+ * System prompt of the bridge agent. Its tools are fully disabled: all agentic
+ * work (reading files, edits, tool calls) belongs to Copilot Chat, and mimocode
+ * is only the transport to the model.
  */
 const AGENT_PROMPT = [
   "You are a chat model accessed through an editor extension.",
@@ -33,21 +27,26 @@ const AGENT_PROMPT = [
   "Follow any instructions and protocols given in the user message itself.",
 ].join(" ");
 
+const delay = (ms: number) =>
+  new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+
 export interface MimoServerHandle {
   url: string;
-  /** Готовый заголовок Basic-авторизации локального сервера. */
+  /** Ready-made Basic auth header of the local server. */
   authHeader: string;
-  /** Рабочая директория сессий (нейтральная, вне проекта пользователя). */
+  /** Session working directory (neutral, outside the user's project). */
   directory: string;
 }
 
 /**
- * Управляет фоновым процессом `mimo serve` — headless-сервером mimocode.
+ * Owns the background `mimo serve` process — the headless mimocode server.
  *
- * Почему сервер, а не `mimo run` на каждый запрос: `run` печатает готовый ответ
- * одним куском (стриминга нет), а серверный SSE `/event` отдаёт дельты токен за
- * токеном плюс умеет отмену запроса. Учётные данные при этом остаются у CLI —
- * ни ключей, ни токенов расширение не хранит.
+ * Why a server and not `mimo run` per request: `run` prints the finished answer
+ * in one piece (no streaming), while the server's `/event` SSE delivers deltas
+ * token by token and supports cancellation. Credentials stay inside the CLI.
  */
 export class MimoServer {
   private handle?: MimoServerHandle;
@@ -57,19 +56,20 @@ export class MimoServer {
   private beforeStop?: () => Promise<void>;
   private disposed = false;
 
-  /** Запускает сервер (или переиспользует уже запущенный) и возвращает адрес. */
+  /** Agent name we post messages under. */
+  get agent(): string {
+    return AGENT_NAME;
+  }
+
+  /** Starts the server (or reuses a running one) and returns its address. */
   async ensure(): Promise<MimoServerHandle> {
     if (this.disposed) {
       throw new ProviderError(PROVIDER_ID, "MiMo provider is disposed");
     }
     this.touch();
 
-    if (this.handle && this.proc && !this.proc.killed) {
-      return this.handle;
-    }
-    if (this.starting) {
-      return this.starting;
-    }
+    if (this.handle && this.proc && !this.proc.killed) return this.handle;
+    if (this.starting) return this.starting;
 
     this.starting = this.start().finally(() => {
       this.starting = undefined;
@@ -77,17 +77,51 @@ export class MimoServer {
     return this.starting;
   }
 
-  /** Продлевает время жизни сервера (вызывается на каждом запросе). */
+  /** Extends the server lifetime; called on every request. */
   touch(): void {
-    if (this.idleTimer) {
-      clearTimeout(this.idleTimer);
-    }
+    if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
       slog.info("idle timeout — stopping server");
       this.stop();
     }, IDLE_SHUTDOWN_MS);
-    // Таймер не должен держать процесс расширения живым.
+    // The timer must not keep the extension host alive.
     this.idleTimer.unref?.();
+  }
+
+  /**
+   * Cleanup hook that gets a chance to run before the process is killed. The
+   * client deletes its throwaway sessions in the background, and without this
+   * pause the last DELETE never landed.
+   */
+  setBeforeStop(hook: () => Promise<void>): void {
+    this.beforeStop = hook;
+  }
+
+  stop(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = undefined;
+    }
+
+    const proc = this.proc;
+    this.proc = undefined;
+    this.handle = undefined;
+    if (!proc || proc.killed) return;
+
+    slog.info("stopping server");
+    // Wait for cleanup, but not for long: a hung server is worse than an
+    // orphaned session.
+    const cleanup = this.beforeStop?.() ?? Promise.resolve();
+    void Promise.race([cleanup.catch(() => undefined), delay(STOP_GRACE_MS)])
+      .catch(() => undefined)
+      .finally(() => {
+        if (!proc.killed) proc.kill();
+      });
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.stop();
   }
 
   private async start(): Promise<MimoServerHandle> {
@@ -100,21 +134,23 @@ export class MimoServer {
     }
 
     const directory = await mimoWorkDir();
-
     const username = "free-ai-vscode";
     const password = randomBytes(24).toString("hex");
-
-    const env = cliEnv({
-      MIMOCODE_SERVER_USERNAME: username,
-      MIMOCODE_SERVER_PASSWORD: password,
-      MIMOCODE_CONFIG_CONTENT: JSON.stringify(this.buildConfig()),
-    });
 
     slog.info(`starting: ${bin} serve`);
     const proc = spawn(
       bin,
       ["serve", "--port", "0", "--hostname", "127.0.0.1", "--pure"],
-      { cwd: directory, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+      {
+        cwd: directory,
+        env: cliEnv({
+          MIMOCODE_SERVER_USERNAME: username,
+          MIMOCODE_SERVER_PASSWORD: password,
+          MIMOCODE_CONFIG_CONTENT: JSON.stringify(buildConfig()),
+        }),
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      },
     );
     this.proc = proc;
 
@@ -125,25 +161,20 @@ export class MimoServer {
         this.handle = undefined;
       }
     });
-    proc.on("error", (err) => {
-      slog.error(`spawn error — ${errToString(err)}`);
-    });
+    proc.on("error", (err) => slog.error(`spawn error — ${errToString(err)}`));
     proc.stderr?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8").trim();
-      if (text) {
-        slog.debug(`stderr: ${text.slice(0, 400)}`);
-      }
+      if (text) slog.debug(`stderr: ${text.slice(0, 400)}`);
     });
 
     try {
-      const url = await this.waitForUrl(proc);
       const handle: MimoServerHandle = {
-        url,
+        url: await waitForUrl(proc),
         authHeader: `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`,
         directory,
       };
       this.handle = handle;
-      slog.info(`ready at ${url}`);
+      slog.info(`ready at ${handle.url}`);
       return handle;
     } catch (err) {
       proc.kill();
@@ -151,118 +182,76 @@ export class MimoServer {
       throw err;
     }
   }
+}
 
-  /** Ждёт строку «listening on http://…» в stdout сервера. */
-  private waitForUrl(proc: ChildProcess): Promise<string> {
-    return new Promise<string>((resolve, reject) => {
-      let buffer = "";
-      let settled = false;
+/** Waits for the "listening on http://…" line on the server's stdout. */
+function waitForUrl(proc: ChildProcess): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    let buffer = "";
+    let settled = false;
 
-      const timer = setTimeout(() => {
-        finish(
-          undefined,
-          new ProviderError(PROVIDER_ID, "MiMo CLI server did not start in time"),
-        );
-      }, STARTUP_TIMEOUT_MS);
+    const finish = (url?: string, err?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      proc.stdout?.off("data", onData);
+      proc.off("exit", onExit);
+      if (url) resolve(url);
+      else
+        reject(err ?? new ProviderError(PROVIDER_ID, "MiMo CLI server failed"));
+    };
 
-      const finish = (url?: string, err?: Error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        proc.stdout?.off("data", onData);
-        proc.off("exit", onExit);
-        if (url) {
-          resolve(url);
-        } else {
-          reject(err ?? new ProviderError(PROVIDER_ID, "MiMo CLI server failed"));
-        }
-      };
-
-      const onData = (chunk: Buffer) => {
-        buffer += chunk.toString("utf8");
-        slog.debug(`stdout: ${chunk.toString("utf8").trim().slice(0, 200)}`);
-        const match = /https?:\/\/[\w.-]+:\d+/.exec(buffer);
-        if (match) {
-          finish(match[0]);
-        }
-      };
-
-      const onExit = (code: number | null) => {
+    const timer = setTimeout(
+      () =>
         finish(
           undefined,
           new ProviderError(
             PROVIDER_ID,
-            `MiMo CLI server exited before start (code=${code}). Run \`mimo\` in a terminal to finish setup.`,
+            "MiMo CLI server did not start in time",
           ),
-        );
-      };
+        ),
+      STARTUP_TIMEOUT_MS,
+    );
 
-      proc.stdout?.on("data", onData);
-      proc.on("exit", onExit);
-    });
-  }
-
-  /**
-   * Конфиг, который отдаём серверу через MIMOCODE_CONFIG_CONTENT: единственный
-   * агент без инструментов. Пользовательский `mimocode.jsonc` не трогаем —
-   * авторизация лежит отдельно (data-dir), поэтому логин CLI продолжает работать.
-   */
-  private buildConfig(): Record<string, unknown> {
-    return {
-      $schema: "https://mimo.xiaomi.com/mimocode/config.json",
-      autoupdate: false,
-      share: "disabled",
-      agent: {
-        [AGENT_NAME]: {
-          description: "Plain chat bridge for AI Free VSCode",
-          mode: "primary",
-          prompt: AGENT_PROMPT,
-          tools: { "*": false },
-        },
-      },
+    const onData = (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      buffer += text;
+      slog.debug(`stdout: ${text.trim().slice(0, 200)}`);
+      const match = /https?:\/\/[\w.-]+:\d+/.exec(buffer);
+      if (match) finish(match[0]);
     };
-  }
 
-  /** Имя агента, под которым шлём сообщения. */
-  get agent(): string {
-    return AGENT_NAME;
-  }
+    const onExit = (code: number | null) =>
+      finish(
+        undefined,
+        new ProviderError(
+          PROVIDER_ID,
+          `MiMo CLI server exited before start (code=${code}). Run \`mimo\` in a terminal to finish setup.`,
+        ),
+      );
 
-  /**
-   * Хук уборки, который успевает отработать до убийства процесса. Клиент
-   * удаляет одноразовые сессии в фоне, и без этой паузы последний DELETE
-   * не долетал — сессия навсегда оставалась в базе mimocode.
-   */
-  setBeforeStop(hook: () => Promise<void>): void {
-    this.beforeStop = hook;
-  }
+    proc.stdout?.on("data", onData);
+    proc.on("exit", onExit);
+  });
+}
 
-  stop(): void {
-    if (this.idleTimer) {
-      clearTimeout(this.idleTimer);
-      this.idleTimer = undefined;
-    }
-    const proc = this.proc;
-    this.proc = undefined;
-    this.handle = undefined;
-    if (!proc || proc.killed) {
-      return;
-    }
-
-    slog.info("stopping server");
-    const cleanup = this.beforeStop?.() ?? Promise.resolve();
-    // Ждём уборку, но недолго: висящий сервер хуже осиротевшей сессии.
-    void Promise.race([cleanup.catch(() => undefined), delay(STOP_GRACE_MS)])
-      .catch(() => undefined)
-      .finally(() => {
-        if (!proc.killed) {
-          proc.kill();
-        }
-      });
-  }
-
-  dispose(): void {
-    this.disposed = true;
-    this.stop();
-  }
+/**
+ * Config passed through MIMOCODE_CONFIG_CONTENT: a single agent with no tools.
+ * The user's own `mimocode.jsonc` is left alone, and credentials live elsewhere
+ * (data-dir), so the CLI login keeps working.
+ */
+function buildConfig(): Record<string, unknown> {
+  return {
+    $schema: "https://mimo.xiaomi.com/mimocode/config.json",
+    autoupdate: false,
+    share: "disabled",
+    agent: {
+      [AGENT_NAME]: {
+        description: "Plain chat bridge for AI Free VSCode",
+        mode: "primary",
+        prompt: AGENT_PROMPT,
+        tools: { "*": false },
+      },
+    },
+  };
 }

@@ -11,12 +11,12 @@ import { MimoServer } from "./MimoServer";
 const log = createLogger("mimo");
 
 /**
- * MiMo (Xiaomi) через официальный CLI `mimo` — бесплатный анонимный канал
- * MiMo Auto.
+ * MiMo (Xiaomi) through the official `mimo` CLI — the free anonymous MiMo Auto
+ * channel.
  *
- * Ни ключей, ни токенов, ни входа: расширение поднимает локальный
- * headless-сервер mimocode (`mimo serve`) и общается с ним по HTTP/SSE.
- * Единственное условие — установленный CLI.
+ * No keys, no tokens, no sign-in: the extension starts a local headless
+ * mimocode server (`mimo serve`) and talks to it over HTTP/SSE. The only
+ * requirement is an installed CLI.
  */
 export class MimoProvider extends BaseAIProvider {
   readonly id = "ai-free-vscode-mimo";
@@ -30,7 +30,7 @@ export class MimoProvider extends BaseAIProvider {
     return MIMO_MODELS;
   }
 
-  /** Модель показываем, только если её реально отдаёт CLI (`mimo models`). */
+  /** A model is offered only if the CLI actually reports it (`mimo models`). */
   override async getAvailableModels(): Promise<AIModelInfo[]> {
     const ids = await this.authManager.availableModelIds();
     return MIMO_MODELS.filter((model) => ids.includes(model.id));

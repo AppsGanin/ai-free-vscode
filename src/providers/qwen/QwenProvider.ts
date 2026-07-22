@@ -1,12 +1,13 @@
 import * as vscode from "vscode";
 import { log } from "../../logger";
 import { BaseAIProvider } from "../BaseAIProvider";
+import { conversationKey } from "../common/messages";
 import type { AIModelInfo, AIRequestParams, AIStreamChunk } from "../types";
 import { AuthExpiredError } from "../types";
 import { QwenApiClient } from "./QwenApiClient";
 import { QwenAuthManager } from "./QwenAuthManager";
 import { QwenBrowserBridge } from "./QwenBrowserBridge";
-import { QWEN_MODELS, resolveModelId, toQwenApiModelType } from "./QwenModels";
+import { QWEN_MODELS, resolveModelId } from "./QwenModels";
 
 export class QwenProvider extends BaseAIProvider {
   readonly id = "ai-free-vscode-qwen";
@@ -24,8 +25,6 @@ export class QwenProvider extends BaseAIProvider {
   private readonly apiClient = new QwenApiClient(this.browser);
   private readonly chatIdByConversation = new Map<string, string>();
 
-  // ─── BaseAIProvider implementation ───────────────────────────────────────
-
   getModels(): AIModelInfo[] {
     return QWEN_MODELS;
   }
@@ -35,8 +34,8 @@ export class QwenProvider extends BaseAIProvider {
   }
 
   async login(secrets: vscode.SecretStorage): Promise<void> {
-    // Persistent-профиль нельзя открыть двумя контекстами сразу: гасим мост
-    // перед интерактивным входом.
+    // A persistent profile cannot be opened by two contexts at once: shut the
+    // bridge down before the interactive sign-in.
     await this.browser.close();
     await this.authManager.login(secrets);
     this._onDidAuthChange.fire();
@@ -58,26 +57,25 @@ export class QwenProvider extends BaseAIProvider {
       throw new AuthExpiredError(this.id);
     }
 
-    const conversationKey = this.buildConversationKey(params);
-    let chatId =
-      params.chatId ?? this.chatIdByConversation.get(conversationKey);
+    const key = conversationKey(params);
+    let chatId = params.chatId ?? this.chatIdByConversation.get(key);
 
     if (!chatId) {
-      const apiModelType = toQwenApiModelType(resolveModelId(params.model));
-      chatId = await this.apiClient.createChat(token, apiModelType);
+      chatId = await this.apiClient.createChat(
+        token,
+        resolveModelId(params.model),
+      );
       if (!chatId) {
         throw new Error("Failed to create chat_id for Qwen");
       }
-      this.chatIdByConversation.set(conversationKey, chatId);
-      log(
-        `[${this.id}] created provider chat_id=${chatId} key=${conversationKey.slice(0, 12)}…`,
-      );
+      this.chatIdByConversation.set(key, chatId);
+      log(`[${this.id}] created provider chat_id=${chatId}`);
     }
 
-    // Клиент может уйти в новый chat_id (занятый чат, обрыв, internal error).
-    // Без переезда кэша следующий ход снова постучится в мёртвый чат.
+    // The client may move to a new chat_id (busy chat, drop, internal error);
+    // without updating the cache the next turn hits the dead chat again.
     const rememberChatId = (newChatId: string) => {
-      this.chatIdByConversation.set(conversationKey, newChatId);
+      this.chatIdByConversation.set(key, newChatId);
       log(`[${this.id}] chat_id switched to ${newChatId}`);
     };
 
@@ -95,8 +93,8 @@ export class QwenProvider extends BaseAIProvider {
         throw err;
       }
 
-      // Токен протух. Живая браузерная сессия (cookies в профиле) может быть ещё
-      // валидна — пробуем достать свежий Bearer из localStorage и повторить один раз.
+      // Token expired, but the live browser session (profile cookies) may still
+      // be valid — pull a fresh Bearer from localStorage and retry once.
       const refreshed = await this.tryRefreshToken(secrets, token);
       if (refreshed) {
         log(`[${this.id}] token refreshed from live session, retrying request`);
@@ -115,58 +113,19 @@ export class QwenProvider extends BaseAIProvider {
         }
       }
 
-      // Обновить не удалось — уведомляем и пробрасываем выше.
       this._onDidAuthChange.fire();
       throw err;
     }
   }
 
-  /**
-   * Пытается получить свежий токен из живой браузерной сессии и сохранить его.
-   * Возвращает новый токен, только если он отличается от текущего.
-   */
+  /** Reads a fresh token from the live browser session; undefined if unchanged. */
   private async tryRefreshToken(
     secrets: vscode.SecretStorage,
     current: string,
   ): Promise<string | undefined> {
     const raw = await this.browser.readToken().catch(() => undefined);
-    if (!raw) {
-      return undefined;
-    }
+    if (!raw) return undefined;
     const stored = await this.authManager.saveToken(secrets, raw);
-    if (!stored || stored === current) {
-      return undefined;
-    }
-    return stored;
-  }
-
-  private buildConversationKey(params: AIRequestParams): string {
-    const firstUser = params.messages.find((m) => m.role === "user");
-    const firstUserText = firstUser
-      ? this.messageContentToString(firstUser.content).slice(0, 600)
-      : "";
-
-    const basis = `${params.model}::${firstUserText}`;
-    return this.hashString(basis);
-  }
-
-  private messageContentToString(
-    content: AIRequestParams["messages"][number]["content"],
-  ): string {
-    if (typeof content === "string") {
-      return content;
-    }
-    return content
-      .map((part) => (part.type === "text" ? part.text : "[image]"))
-      .join("\n");
-  }
-
-  private hashString(value: string): string {
-    let hash = 2166136261;
-    for (let i = 0; i < value.length; i++) {
-      hash ^= value.charCodeAt(i);
-      hash = Math.imul(hash, 16777619);
-    }
-    return (hash >>> 0).toString(16);
+    return stored && stored !== current ? stored : undefined;
   }
 }

@@ -1,101 +1,78 @@
-import { createProviderModelIdResolver } from "../common/ModelIdResolver";
+import { aliasResolver } from "../common/models";
 import type { AIModelInfo } from "../types";
 
-// Актуальный список моделей получен с https://chat.qwen.ai/api/models
-// Оставлены только стабильные флагманы линеек: без preview-веток, без малых и
-// A3B-моделей (ломают tool calling) и без Omni (нет thinking).
+// From https://chat.qwen.ai/api/models — stable flagships only: no preview
+// branches, no small/A3B models (they break tool calling), no Omni (no thinking).
 
-/** Все фичи расширения: thinking у Qwen выключается настройкой. */
-const QWEN_FEATURES = {
+const FEATURES = {
   chat: true,
   commit: true,
   suggestions: true,
   fix: true,
 } as const;
 
+const BASE = {
+  maxInputTokens: 1000000,
+  maxOutputTokens: 65536,
+} as const;
+
 export const QWEN_MODELS: AIModelInfo[] = [
-  // ─── Qwen 3.7 ────────────────────────────────────────────────────────────
   {
+    ...BASE,
     id: "qwen3.7-plus",
     name: "Qwen3.7 Plus",
     family: "Qwen3.7",
-    maxInputTokens: 1000000,
-    maxOutputTokens: 65536,
     capabilities: {
       toolCalling: true,
       streaming: true,
       imageInput: true,
       thinking: true,
-      ...QWEN_FEATURES,
+      ...FEATURES,
     },
   },
   {
+    ...BASE,
     id: "qwen3.7-max",
     name: "Qwen3.7 Max",
     family: "Qwen3.7",
-    maxInputTokens: 1000000,
-    maxOutputTokens: 65536,
     capabilities: {
       toolCalling: true,
       streaming: true,
       thinking: true,
-      ...QWEN_FEATURES,
+      ...FEATURES,
     },
   },
-  // ─── Qwen 3.6 ────────────────────────────────────────────────────────────
   {
+    ...BASE,
     id: "qwen3.6-plus",
     name: "Qwen3.6 Plus",
     family: "Qwen3.6",
-    maxInputTokens: 1000000,
-    maxOutputTokens: 65536,
     capabilities: {
       toolCalling: true,
       streaming: true,
       imageInput: true,
       thinking: true,
-      ...QWEN_FEATURES,
+      ...FEATURES,
     },
   },
-  // ─── Qwen 3.5 ────────────────────────────────────────────────────────────
   {
+    ...BASE,
     id: "qwen3.5-plus",
     name: "Qwen3.5 Plus",
     family: "Qwen3.5",
-    maxInputTokens: 1000000,
-    maxOutputTokens: 65536,
     capabilities: {
       toolCalling: true,
       streaming: true,
       imageInput: true,
       thinking: true,
-      ...QWEN_FEATURES,
+      ...FEATURES,
     },
   },
 ];
 
-/** Алиасы: короткое имя → канонический ID */
-export const QWEN_MODEL_ALIASES: Record<string, string> = {
-  // Qwen 3.7
+export const resolveModelId = aliasResolver({
   "qwen3.7": "qwen3.7-max",
-  // Qwen 3.6
   "qwen3.6": "qwen3.6-plus",
-  // Qwen 3.5
   "qwen3.5": "qwen3.5-plus",
-  // Generic
   "qwen-plus": "qwen3.6-plus",
-};
-
-const QWEN_MODEL_ID_RESOLVER = createProviderModelIdResolver({
-  aliases: QWEN_MODEL_ALIASES,
 });
-
-/** Разрешает алиас в канонический ID модели */
-export function resolveModelId(id: string): string {
-  return QWEN_MODEL_ID_RESOLVER.resolveModelId(id);
-}
-
-/** Преобразует ID модели к model_type, ожидаемому API Qwen */
-export function toQwenApiModelType(id: string): string {
-  return QWEN_MODEL_ID_RESOLVER.toApiModelType(id);
-}

@@ -1,12 +1,12 @@
 import { log } from "../../logger";
-import { supportsThinking } from "../common/ModelCapabilities";
+import { throwForStatus } from "../common/http";
+import { LANGUAGE_GUARD, buildRolePrompt } from "../common/messages";
+import { thinkingEnabled } from "../common/models";
+import { readText, sseEvents } from "../common/stream";
 import { StreamingToolCallRouter } from "../common/StreamingToolCallRouter";
-import {
-  buildToolsSystemPrompt,
-  selectToolsForPrompt,
-} from "../common/ToolCalling";
-import type { AIMessage, AIRequestParams, AIStreamChunk } from "../types";
-import { AuthExpiredError, ProviderError, RateLimitError } from "../types";
+import { buildToolsSystemPrompt } from "../common/ToolCalling";
+import type { AIRequestParams, AIStreamChunk } from "../types";
+import { AuthExpiredError, ProviderError } from "../types";
 import {
   DEEPSEEK_MODELS,
   resolveDeepSeekModelId,
@@ -24,6 +24,12 @@ const DEEPSEEK_SHA3_WASM =
   "https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm";
 
 const STREAM_TIMEOUT_MS = 30000;
+/**
+ * Roughly the model's 128k input window at ~3 chars per token. Agent turns
+ * carry whole files in their tool results and blow past it easily; the oldest
+ * turns are dropped rather than letting the upstream answer with nothing.
+ */
+const MAX_PROMPT_CHARS = 300000;
 
 export interface DeepSeekAuthState {
   token?: string;
@@ -45,19 +51,654 @@ interface DeepSeekResponseJson {
   msg?: string;
   data?: {
     code?: number;
-    msg?: string;
     biz_code?: number;
     biz_msg?: string;
     biz_data?: {
       id?: string;
       chat_session?: { id?: string };
       challenge?: PowChallenge;
-      [key: string]: unknown;
     };
   };
 }
 
-let wasmSolverPromise: Promise<DeepSeekHash> | undefined;
+/** Target of a content patch: the answer channel or the reasoning channel. */
+type PatchTarget = "text" | "thinking";
+
+/**
+ * Patches for the same path arrive abbreviated: first
+ * `{"p":"response/content","o":"APPEND","v":"H"}`, then just `{"v":"e"}`.
+ * `lastTarget` keeps such tails routed to the right channel, and
+ * `fragmentTargets` records the type of each fragment by creation order —
+ * `response/fragments/<N>/content` carries no THINK/RESPONSE marker itself.
+ */
+interface PatchState {
+  lastTarget: PatchTarget;
+  fragmentTargets: PatchTarget[];
+}
+
+export class DeepSeekApiClient {
+  async createSession(
+    auth: DeepSeekAuthState,
+    abortSignal?: AbortSignal,
+  ): Promise<string> {
+    const json = await this.requestJson(
+      CREATE_SESSION_PATH,
+      auth,
+      {},
+      abortSignal,
+    );
+    const biz = json?.data?.biz_data;
+    const sessionId = biz?.id ?? biz?.chat_session?.id;
+    if (!sessionId) {
+      throw new ProviderError(
+        PROVIDER_ID,
+        `Failed to get DeepSeek session id: ${JSON.stringify(json).slice(0, 250)}`,
+      );
+    }
+    return sessionId;
+  }
+
+  async *sendMessageStream(
+    params: AIRequestParams,
+    auth: DeepSeekAuthState,
+    options?: { onMessageId?: (messageId: number) => void },
+  ): AsyncIterable<AIStreamChunk> {
+    const sessionId = params.chatId;
+    if (!sessionId) {
+      throw new ProviderError(
+        PROVIDER_ID,
+        "Missing session_id for the request",
+      );
+    }
+
+    const hasTools = (params.tools?.length ?? 0) > 0;
+    const allowToolCalls = params.toolMode !== "none" && hasTools;
+    const modelType = toDeepSeekApiModelType(params.model);
+    const thinking = thinkingEnabled(
+      DEEPSEEK_MODELS,
+      resolveDeepSeekModelId(params.model),
+      hasTools,
+      params.thinkingMode,
+    );
+
+    // The tools prompt already carries the language instruction, and is added
+    // after the cap so the protocol itself is never trimmed away.
+    const prompt = buildRolePrompt(params.messages, {
+      system: hasTools
+        ? buildToolsSystemPrompt(params.tools ?? [])
+        : LANGUAGE_GUARD,
+      maxChars: MAX_PROMPT_CHARS,
+    });
+    const parentMessageId = Number(params.parentId);
+
+    log(
+      `[deepseek-api] request model=${modelType} thinking=${thinking} hasTools=${hasTools}`,
+    );
+
+    const response = await fetch(`${BASE_URL}${COMPLETION_PATH}`, {
+      method: "POST",
+      headers: {
+        ...this.buildHeaders(auth),
+        "X-DS-PoW-Response": await this.createPowHeader(
+          auth,
+          COMPLETION_PATH,
+          params.abortSignal,
+        ),
+      },
+      body: JSON.stringify({
+        chat_session_id: sessionId,
+        parent_message_id: Number.isFinite(parentMessageId)
+          ? Math.floor(parentMessageId)
+          : null,
+        model_type: modelType,
+        preempt: false,
+        prompt,
+        ref_file_ids: [],
+        thinking_enabled: thinking,
+        search_enabled: false,
+      }),
+      signal: params.abortSignal,
+    });
+
+    throwForStatus(PROVIDER_ID, response);
+
+    const contentType = String(response.headers.get("content-type") || "");
+    if (!response.ok || !contentType.includes("text/event-stream")) {
+      this.throwCompletionHttpError(
+        response.status,
+        await response.text().catch(() => ""),
+      );
+    }
+    if (!response.body) {
+      throw new ProviderError(PROVIDER_ID, "Response body is empty");
+    }
+
+    const router = new StreamingToolCallRouter(
+      allowToolCalls,
+      log,
+      "[deepseek-api] ",
+    );
+    const cache = new Map<string, string>();
+    const state: PatchState = { lastTarget: "text", fragmentTargets: [] };
+    // Needed to stop generation server-side on an early break: a plain cancel
+    // leaves the message "wip" and the next request in this session fails.
+    let currentMessageId: number | undefined;
+    let textChunks = 0;
+    let thinkingChunks = 0;
+    // Diagnostics for the "finished but said nothing" case: they separate an
+    // empty upstream from content we failed to extract or held back. Most
+    // unrecognised events are harmless metadata (status, token counts), so the
+    // samples are only reported if the answer really did come out empty.
+    let events = 0;
+    let extractedChars = 0;
+    const unrecognised: string[] = [];
+    const startedAt = Date.now();
+    let cutShort = false;
+
+    for await (const event of sseEvents(
+      readText(response.body, {
+        providerId: PROVIDER_ID,
+        idleTimeoutMs: STREAM_TIMEOUT_MS,
+      }),
+    )) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(event.data);
+      } catch {
+        continue;
+      }
+      events++;
+
+      this.throwIfSseBizError(parsed);
+      const { text, thinking, messageId } = extractDelta(parsed, cache, state);
+      extractedChars += text.length + thinking.length;
+
+      if (!text && !thinking && messageId === null && unrecognised.length < 5) {
+        unrecognised.push(event.data.slice(0, 300));
+      }
+
+      if (typeof messageId === "number") {
+        currentMessageId = messageId;
+        options?.onMessageId?.(messageId);
+      }
+      if (thinking) {
+        thinkingChunks++;
+        yield { type: "thinking", content: thinking };
+      }
+      for (const chunk of router.route(text)) {
+        if (chunk.type === "text") textChunks++;
+        yield chunk;
+      }
+
+      // The transcript guard fired: the upstream is only play-acting the rest of
+      // the dialog now. Stop it properly, then drop the read.
+      if (router.cut) {
+        cutShort = true;
+        log("[deepseek-api] transcript boundary detected — stopping stream");
+        await this.stopStream(auth, sessionId, currentMessageId).catch((err) =>
+          log(`[deepseek-api] stop_stream failed: ${String(err)}`),
+        );
+        break;
+      }
+    }
+
+    let toolCalls = 0;
+    for (const chunk of router.finish()) {
+      if (chunk.type === "text") textChunks++;
+      if (chunk.type === "tool_call") toolCalls++;
+      yield chunk;
+    }
+
+    log(
+      `[deepseek-api] stream done in ${Date.now() - startedAt}ms model=${modelType} events=${events} chars=${extractedChars} textChunks=${textChunks} thinkingChunks=${thinkingChunks} toolCalls=${toolCalls} promptChars=${prompt.length}${cutShort ? " (cut at transcript boundary)" : ""}`,
+    );
+
+    if (textChunks === 0 && thinkingChunks === 0 && toolCalls === 0) {
+      log(
+        `[deepseek-api] stream produced nothing — allowToolCalls=${allowToolCalls}`,
+      );
+      for (const sample of unrecognised) {
+        log(`[deepseek-api]   unrecognised event: ${sample}`);
+      }
+    }
+  }
+
+  async stopStream(
+    auth: DeepSeekAuthState,
+    sessionId: string,
+    messageId?: number,
+  ): Promise<void> {
+    await this.requestJson(STOP_STREAM_PATH, auth, {
+      chat_session_id: sessionId,
+      ...(Number.isFinite(messageId) ? { message_id: messageId } : {}),
+    });
+  }
+
+  private throwIfSseBizError(parsed: unknown): void {
+    const data = parsed as {
+      type?: unknown;
+      content?: unknown;
+      finish_reason?: unknown;
+      biz_code?: unknown;
+      biz_msg?: unknown;
+      data?: { biz_code?: unknown; biz_msg?: unknown };
+    } | null;
+    if (!data || typeof data !== "object") return;
+
+    // In-stream failure frame, e.g. the one-generation-per-account limit:
+    // {"type":"error","content":"…","finish_reason":"parallel_chat_limit"}
+    if (data.type === "error" && typeof data.content === "string") {
+      const reason = data.finish_reason
+        ? ` (${String(data.finish_reason)})`
+        : "";
+      throw new ProviderError(PROVIDER_ID, `${data.content}${reason}`);
+    }
+
+    const code = data.data?.biz_code ?? data.biz_code;
+    if (typeof code === "number" && code !== 0) {
+      const msg = data.data?.biz_msg ?? data.biz_msg;
+      throw new ProviderError(
+        PROVIDER_ID,
+        `DeepSeek biz error ${code}: ${typeof msg === "string" ? msg : "Unknown error"}`,
+      );
+    }
+  }
+
+  private throwCompletionHttpError(status: number, text: string): never {
+    let message = `HTTP ${status}: ${text.slice(0, 220)}`;
+    try {
+      const parsed = JSON.parse(text) as {
+        code?: number;
+        msg?: string;
+        data?: { biz_code?: number; biz_msg?: string };
+      };
+      if (parsed.code === 40002 || parsed.code === 40003) {
+        throw new AuthExpiredError(PROVIDER_ID);
+      }
+      if (typeof parsed.data?.biz_code === "number") {
+        message = `DeepSeek biz error ${parsed.data.biz_code}: ${parsed.data.biz_msg ?? ""}`;
+      } else if (parsed.msg) {
+        message = parsed.msg;
+      }
+    } catch (err) {
+      if (err instanceof AuthExpiredError) throw err;
+      // not JSON — keep the raw message
+    }
+
+    throw new ProviderError(PROVIDER_ID, message, status);
+  }
+
+  // ─── Proof of work ────────────────────────────────────────────────────────
+
+  private async createPowHeader(
+    auth: DeepSeekAuthState,
+    targetPath: string,
+    abortSignal?: AbortSignal,
+  ): Promise<string> {
+    const json = await this.requestJson(
+      CREATE_POW_CHALLENGE_PATH,
+      auth,
+      { target_path: targetPath },
+      abortSignal,
+    );
+
+    const challenge = json?.data?.biz_data?.challenge;
+    if (!challenge) {
+      throw new ProviderError(
+        PROVIDER_ID,
+        `PoW challenge not received: ${JSON.stringify(json).slice(0, 220)}`,
+      );
+    }
+    if (challenge.algorithm !== "DeepSeekHashV1") {
+      throw new ProviderError(
+        PROVIDER_ID,
+        `Unsupported PoW algorithm: ${challenge.algorithm}`,
+      );
+    }
+
+    const expireAt = challenge.expire_at ?? challenge.expireAt;
+    if (!Number.isFinite(expireAt)) {
+      throw new ProviderError(PROVIDER_ID, "PoW challenge without expire_at");
+    }
+
+    const solver = await getWasmSolver();
+    const answer = solver.calculateHash(
+      challenge.challenge,
+      challenge.salt,
+      Number(challenge.difficulty),
+      Number(expireAt),
+    );
+    if (!Number.isInteger(answer)) {
+      throw new ProviderError(
+        PROVIDER_ID,
+        "PoW solver returned an invalid answer",
+      );
+    }
+
+    return Buffer.from(
+      JSON.stringify({
+        algorithm: challenge.algorithm,
+        challenge: challenge.challenge,
+        salt: challenge.salt,
+        answer,
+        signature: challenge.signature,
+        target_path: targetPath,
+      }),
+      "utf8",
+    ).toString("base64");
+  }
+
+  // ─── Plain JSON endpoints ─────────────────────────────────────────────────
+
+  private async requestJson(
+    path: string,
+    auth: DeepSeekAuthState,
+    body: unknown,
+    abortSignal?: AbortSignal,
+  ): Promise<DeepSeekResponseJson> {
+    const response = await fetch(`${BASE_URL}${path}`, {
+      method: "POST",
+      headers: this.buildHeaders(auth),
+      body: JSON.stringify(body),
+      signal: abortSignal,
+    });
+
+    const text = await response.text().catch(() => "");
+    let json: DeepSeekResponseJson;
+    try {
+      json = JSON.parse(text) as DeepSeekResponseJson;
+    } catch {
+      throwForStatus(PROVIDER_ID, response);
+      throw new ProviderError(
+        PROVIDER_ID,
+        `Invalid JSON from DeepSeek (${path}), status=${response.status}`,
+        response.status,
+      );
+    }
+
+    throwForStatus(PROVIDER_ID, response);
+
+    if ([json.code, json.data?.code].some((c) => c === 40002 || c === 40003)) {
+      throw new AuthExpiredError(PROVIDER_ID);
+    }
+
+    const bizCode = json.data?.biz_code;
+    if (typeof bizCode === "number" && bizCode !== 0) {
+      throw new ProviderError(
+        PROVIDER_ID,
+        `DeepSeek biz error ${bizCode}: ${json.data?.biz_msg ?? ""}`,
+        response.status,
+      );
+    }
+    if (!response.ok) {
+      throw new ProviderError(
+        PROVIDER_ID,
+        `HTTP ${response.status}: ${text.slice(0, 220)}`,
+        response.status,
+      );
+    }
+
+    return json;
+  }
+
+  private buildHeaders(auth: DeepSeekAuthState): Record<string, string> {
+    return {
+      "User-Agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+      Accept: "*/*",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Content-Type": "application/json",
+      Origin: BASE_URL,
+      Referer: `${BASE_URL}/`,
+      Cookie: auth.cookieHeader,
+      "X-App-Version": APP_VERSION,
+      "x-client-platform": "web",
+      "x-client-version": APP_VERSION,
+      "x-client-locale": "en",
+      "x-client-timezone-offset": String(-new Date().getTimezoneOffset() * 60),
+      // Cookies alone are not enough: without the Bearer the API answers 40002.
+      ...(auth.token ? { Authorization: `Bearer ${auth.token}` } : {}),
+    };
+  }
+}
+
+// ─── Delta extraction ───────────────────────────────────────────────────────
+
+const CONTENT_PATH_RE = /\/(content|text|answer)$/i;
+const THINKING_PATH_RE =
+  /\/(reasoning_content|reasoning|thinking|thinking_content|reasoning_text)$/i;
+/** `response/fragments/<N>/content`, where N may be negative (-1 = last). */
+const FRAGMENT_PATH_RE = /\/fragments\/(-?\d+)\/content$/i;
+const THINK_TYPE_RE = /^(think|reason|reasoning|cot|thinking)$/i;
+const THINKING_FIELD_RE =
+  /^(reasoning|reasoning_content|reasoning_text|thinking|thinking_content|thought|thoughts|cot)$/i;
+const CONTENT_CARRIER_TYPES = [
+  "response",
+  "template_response",
+  "answer",
+  "assistant",
+  "text",
+  "message",
+];
+
+/**
+ * Walks a DeepSeek SSE payload and pulls out the new text / reasoning. The
+ * format is a patch stream (`{p, o, v}`) mixed with plain snapshots, so the
+ * cache stores what was already emitted per path and only the delta is returned.
+ */
+function extractDelta(
+  value: unknown,
+  cache: Map<string, string>,
+  state: PatchState,
+): { text: string; thinking: string; messageId: number | null } {
+  let messageId: number | null = null;
+  let text = "";
+  let thinking = "";
+
+  const append = (target: PatchTarget, delta: string) => {
+    if (target === "thinking") thinking += delta;
+    else text += delta;
+  };
+
+  /** Emits only what is new compared to the previous snapshot of this key. */
+  const appendSnapshot = (
+    key: string,
+    current: string,
+    target: PatchTarget,
+  ) => {
+    const previous = cache.get(key) ?? "";
+    const delta = current.startsWith(previous)
+      ? current.slice(previous.length)
+      : current;
+    cache.set(key, current);
+    if (delta) append(target, delta);
+  };
+
+  const targetForPath = (path: string): PatchTarget | undefined => {
+    const fragment = FRAGMENT_PATH_RE.exec(path);
+    if (fragment) {
+      const raw = Number(fragment[1]);
+      const list = state.fragmentTargets;
+      // Fragment type not registered yet — fall back to the active target.
+      return list[raw < 0 ? list.length + raw : raw] ?? state.lastTarget;
+    }
+    if (THINKING_PATH_RE.test(path)) return "thinking";
+    if (CONTENT_PATH_RE.test(path)) return "text";
+    return undefined;
+  };
+
+  const visit = (node: unknown, path: string): void => {
+    if (!node || typeof node !== "object") return;
+    const obj = node as Record<string, unknown>;
+
+    for (const raw of [obj.response_message_id, obj.message_id]) {
+      const id = toFiniteNumber(raw);
+      if (id !== null) messageId = id;
+    }
+    const role = typeof obj.role === "string" ? obj.role.toLowerCase() : "";
+    if (role === "assistant") {
+      const id = toFiniteNumber(obj.id);
+      if (id !== null) messageId = id;
+    }
+
+    // Abbreviated patch `{"v":"…"}` with no path: continues the previous APPEND.
+    // Happens at any depth (inside BATCH too), hence no path check.
+    if (Object.keys(obj).length === 1 && typeof obj.v === "string") {
+      append(state.lastTarget, obj.v);
+      return;
+    }
+
+    // Fragment registration comes before the APPEND branch so the target of the
+    // content that follows is already known:
+    //   {"p":"response/fragments","o":"APPEND","v":[{"type":"RESPONSE"|"THINK"}]}
+    if (
+      obj.o === "APPEND" &&
+      obj.p === "response/fragments" &&
+      Array.isArray(obj.v)
+    ) {
+      obj.v.forEach((fragment, i) => {
+        if (!fragment || typeof fragment !== "object") return;
+        const frag = fragment as Record<string, unknown>;
+        const type = typeof frag.type === "string" ? frag.type : "";
+        const target: PatchTarget = THINK_TYPE_RE.test(type)
+          ? "thinking"
+          : "text";
+
+        state.fragmentTargets.push(target);
+        state.lastTarget = target;
+
+        if (typeof frag.content === "string" && frag.content) {
+          const id = frag.id === undefined ? `idx-${i}` : String(frag.id);
+          appendSnapshot(
+            `${messageId ?? "unknown"}:${path}:fragment:${id}:content`,
+            frag.content,
+            target,
+          );
+        }
+      });
+      return;
+    }
+
+    if (obj.o === "BATCH" && Array.isArray(obj.v)) {
+      obj.v.forEach((item, idx) => visit(item, `${path}.v.${idx}`));
+      return;
+    }
+
+    // Path patches. `o` may be missing entirely — then it inherits the previous
+    // operation, which is an append.
+    if (typeof obj.p === "string" && typeof obj.v === "string") {
+      const target = targetForPath(obj.p);
+      if (target) {
+        state.lastTarget = target;
+        if (typeof obj.o === "string" && obj.o !== "APPEND") {
+          appendSnapshot(
+            `${messageId ?? "unknown"}:${path}:${obj.p}`,
+            obj.v,
+            target,
+          );
+        } else {
+          append(target, obj.v);
+        }
+        return;
+      }
+    }
+
+    if (
+      typeof obj.content === "string" &&
+      (typeof obj.type === "string" || role === "assistant")
+    ) {
+      const type = typeof obj.type === "string" ? obj.type.toLowerCase() : "";
+      const phase =
+        typeof obj.phase === "string" ? obj.phase.toLowerCase() : "";
+      const key = `${messageId ?? "unknown"}:${path}:${type || role || "content"}`;
+
+      if (THINK_TYPE_RE.test(type) || phase === "think") {
+        appendSnapshot(key, obj.content, "thinking");
+      } else if (CONTENT_CARRIER_TYPES.includes(type) || role === "assistant") {
+        appendSnapshot(key, obj.content, "text");
+      }
+    }
+
+    if (typeof obj.text === "string") {
+      appendSnapshot(
+        `${messageId ?? "unknown"}:${path}:text`,
+        obj.text,
+        "text",
+      );
+    }
+
+    if (obj.delta && typeof obj.delta === "object") {
+      const delta = obj.delta as Record<string, unknown>;
+      const isThinkPhase =
+        typeof obj.phase === "string" && obj.phase.toLowerCase() === "think";
+      for (const field of [
+        "content",
+        "reasoning_content",
+        "thinking",
+        "reasoning",
+        "text",
+        "answer",
+      ]) {
+        const val = delta[field];
+        if (typeof val !== "string") continue;
+        const target: PatchTarget =
+          THINKING_FIELD_RE.test(field) || (field === "content" && isThinkPhase)
+            ? "thinking"
+            : "text";
+        appendSnapshot(
+          `${messageId ?? "unknown"}:${path}:delta:${field}`,
+          val,
+          target,
+        );
+      }
+    }
+
+    const choice = Array.isArray(obj.choices) ? obj.choices[0] : undefined;
+    if (choice && typeof choice === "object") {
+      const delta = (choice as { delta?: Record<string, unknown> }).delta ?? {};
+      if (typeof delta.content === "string") text += delta.content;
+      if (typeof delta.reasoning_content === "string") {
+        thinking += delta.reasoning_content;
+      }
+    }
+
+    if (Array.isArray(node)) {
+      node.forEach((item, idx) => visit(item, `${path}.${idx}`));
+      return;
+    }
+
+    // `content`, `choices` and `delta` are fully handled above; descending into
+    // them again would emit the same reasoning text a second time.
+    for (const [key, item] of Object.entries(obj)) {
+      if (key === "content" || key === "choices" || key === "delta") continue;
+      if (typeof item === "string") {
+        if (THINKING_FIELD_RE.test(key)) {
+          appendSnapshot(
+            `${messageId ?? "unknown"}:${path}:field:${key}`,
+            item,
+            "thinking",
+          );
+        }
+        continue;
+      }
+      visit(item, `${path}.${key}`);
+    }
+  };
+
+  visit(value, "$");
+  return { text, thinking, messageId };
+}
+
+function toFiniteNumber(raw: unknown): number | null {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string" && raw.trim()) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+// ─── PoW solver (wasm) ──────────────────────────────────────────────────────
 
 type DeepSeekWasmExports = {
   memory: WebAssembly.Memory;
@@ -79,1127 +720,89 @@ type DeepSeekWasmExports = {
   ): void;
 };
 
-export class DeepSeekApiClient {
-  async createSession(
-    auth: DeepSeekAuthState,
-    abortSignal?: AbortSignal,
-  ): Promise<string> {
-    const json = await this.requestJson(CREATE_SESSION_PATH, {
-      method: "POST",
-      auth,
-      body: {},
-      abortSignal,
-    });
-
-    const biz = json?.data?.biz_data;
-    const sessionId = biz?.id ?? biz?.chat_session?.id;
-    if (!sessionId) {
-      throw new ProviderError(
-        PROVIDER_ID,
-        `Failed to get DeepSeek session id: ${JSON.stringify(json).slice(0, 250)}`,
-      );
-    }
-
-    return sessionId;
-  }
-
-  async *sendMessageStream(
-    params: AIRequestParams,
-    auth: DeepSeekAuthState,
-    options?: { onMessageId?: (messageId: number) => void },
-  ): AsyncIterable<AIStreamChunk> {
-    const sessionId = params.chatId;
-    if (!sessionId) {
-      throw new ProviderError(
-        PROVIDER_ID,
-        "Missing session_id for the request",
-      );
-    }
-
-    const hasTools = (params.tools?.length ?? 0) > 0;
-    const allowToolCalls = params.toolMode !== "none" && hasTools;
-
-    let toolsPrompt: string | undefined;
-    if (hasTools && params.tools?.length) {
-      const selectedTools = selectToolsForPrompt(
-        params.tools,
-        this.contentToString(
-          params.messages[params.messages.length - 1]?.content ?? "",
-        ),
-        params.toolMode,
-      );
-      toolsPrompt = buildToolsSystemPrompt(selectedTools);
-    }
-
-    const prompt = this.buildPromptFromMessages(params.messages, toolsPrompt);
-    const parentMessageId = this.parseParentMessageId(params.parentId);
-    const resolvedModelId = resolveDeepSeekModelId(params.model);
-    const modelType = toDeepSeekApiModelType(resolvedModelId);
-    const thinkingConfig = this.resolveThinkingConfig(
-      resolvedModelId,
-      hasTools,
-      params.thinkingMode,
-    );
-    log(
-      `[deepseek-api] thinking mode=${thinkingConfig.mode} enabled=${thinkingConfig.enabled} hasTools=${hasTools} model=${resolvedModelId}`,
-    );
-
-    const powHeader = await this.createPowHeader(
-      auth,
-      COMPLETION_PATH,
-      params.abortSignal,
-    );
-
-    const response = await fetch(`${BASE_URL}${COMPLETION_PATH}`, {
-      method: "POST",
-      headers: {
-        ...this.buildHeaders(auth),
-        "X-DS-PoW-Response": powHeader,
-      },
-      body: JSON.stringify({
-        chat_session_id: sessionId,
-        parent_message_id: parentMessageId ?? null,
-        model_type: modelType,
-        preempt: false,
-        prompt,
-        ref_file_ids: [],
-        thinking_enabled: thinkingConfig.enabled,
-        search_enabled: false,
-      }),
-      signal: params.abortSignal,
-    });
-
-    if (response.status === 401 || response.status === 403) {
-      throw new AuthExpiredError(PROVIDER_ID);
-    }
-    if (response.status === 429) {
-      const retryAfter = response.headers.get("retry-after");
-      throw new RateLimitError(
-        PROVIDER_ID,
-        retryAfter ? Number(retryAfter) * 1000 : undefined,
-      );
-    }
-
-    const contentType = String(response.headers.get("content-type") || "");
-    if (!response.ok || !contentType.includes("text/event-stream")) {
-      const txt = await response.text().catch(() => "");
-      this.throwCompletionHttpError(response.status, txt);
-    }
-
-    if (!response.body) {
-      throw new ProviderError(PROVIDER_ID, "Response body is empty");
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-
-    let buffer = "";
-    let lastActivityAt = Date.now();
-    const fragments = new Map<string, string>();
-    let parsedEventsCount = 0;
-    // Последний message_id ответа — нужен, чтобы корректно остановить генерацию
-    // на сервере (stop_stream) при обрыве, иначе следующий запрос в тот же диалог
-    // упирается в "message still wip".
-    let currentMessageId: number | undefined;
-    let emittedTextChunks = 0;
-    let emittedThinkingChunks = 0;
-    const router = new StreamingToolCallRouter(
-      allowToolCalls,
-      log,
-      "[deepseek-api] ",
-    );
-    // DeepSeek-патчи для одного и того же пути приходят сокращённо: первый раз
-    // {"p":"response/content","o":"APPEND","v":"H"}, далее просто {"v":"e"}.
-    // Чтобы такие "хвостовые" патчи (в т.ч. внутри BATCH) не терялись и не
-    // утекали в text вместо thinking, держим активную цель между событиями.
-    // fragmentTargets хранит цель (text/thinking) для каждого фрагмента ответа
-    // по порядку добавления: контент приходит по пути
-    // response/fragments/<N>/content, и тип (THINK/RESPONSE) известен только из
-    // момента создания фрагмента, а не из самого пути.
-    const patchState: {
-      lastTarget: "text" | "thinking";
-      fragmentTargets: Array<"text" | "thinking">;
-    } = {
-      lastTarget: "text",
-      fragmentTargets: [],
-    };
-
-    // Обёртка над общим роутером: считает отданные text-чанки для диагностики.
-    const routeTextChunk = function* (
-      rawText: string,
-    ): Iterable<AIStreamChunk> {
-      for (const chunk of router.route(rawText)) {
-        if (chunk.type === "text") {
-          emittedTextChunks++;
-        }
-        yield chunk;
-      }
-    };
-
-    const throwIfTimedOut = () => {
-      if (Date.now() - lastActivityAt > STREAM_TIMEOUT_MS) {
-        throw new ProviderError(PROVIDER_ID, "DeepSeek stream timeout");
-      }
-    };
-
-    const findEventBoundary = (
-      input: string,
-    ): { index: number; separatorLength: number } | undefined => {
-      const lfIndex = input.indexOf("\n\n");
-      const crlfIndex = input.indexOf("\r\n\r\n");
-
-      if (lfIndex === -1 && crlfIndex === -1) {
-        return undefined;
-      }
-
-      if (lfIndex === -1) {
-        return { index: crlfIndex, separatorLength: 4 };
-      }
-      if (crlfIndex === -1) {
-        return { index: lfIndex, separatorLength: 2 };
-      }
-
-      return lfIndex < crlfIndex
-        ? { index: lfIndex, separatorLength: 2 }
-        : { index: crlfIndex, separatorLength: 4 };
-    };
-
-    try {
-      while (true) {
-        throwIfTimedOut();
-        const { done, value } = await reader.read();
-        if (done) {
-          buffer += decoder.decode();
-          break;
-        }
-        if (value?.length) {
-          lastActivityAt = Date.now();
-        }
-
-        buffer += decoder.decode(value, { stream: true });
-
-        let boundary = findEventBoundary(buffer);
-        while (boundary) {
-          const rawEvent = buffer.slice(0, boundary.index);
-          buffer = buffer.slice(boundary.index + boundary.separatorLength);
-
-          const event = this.parseSseEvent(rawEvent);
-          if (!event.data) {
-            boundary = findEventBoundary(buffer);
-            continue;
-          }
-
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(event.data);
-            parsedEventsCount++;
-          } catch {
-            boundary = findEventBoundary(buffer);
-            continue;
-          }
-
-          this.throwIfSseBizError(parsed);
-
-          const { text, thinking, messageId } = this.extractDeltaText(
-            parsed,
-            fragments,
-            patchState,
-          );
-          if (typeof messageId === "number") {
-            currentMessageId = messageId;
-            options?.onMessageId?.(messageId);
-          }
-          if (thinking) {
-            emittedThinkingChunks++;
-            yield { type: "thinking", content: thinking };
-          }
-          if (text) {
-            yield* routeTextChunk(text);
-          }
-
-          boundary = findEventBoundary(buffer);
-        }
-
-        // Транскрипт-страж в роутере распознал фейковый следующий ход — апстрим
-        // дальше только «доигрывает» диалог. Останавливаем генерацию на сервере
-        // через stop_stream (просто cancel оставляет сообщение "wip" — следующий
-        // запрос в тот же диалог падает с biz error 11), затем рвём чтение.
-        if (router.cut) {
-          log("[deepseek-api] transcript boundary detected — stopping stream");
-          try {
-            await this.stopStream(auth, sessionId, currentMessageId);
-          } catch (stopErr) {
-            log(`[deepseek-api] stop_stream failed: ${String(stopErr)}`);
-          }
-          try {
-            await reader.cancel();
-          } catch {
-            // ignore
-          }
-          break;
-        }
-      }
-
-      // Разбираем возможные события, оставшиеся после финального decoder.decode().
-      let tailBoundary = findEventBoundary(buffer);
-      while (tailBoundary) {
-        const rawEvent = buffer.slice(0, tailBoundary.index);
-        buffer = buffer.slice(
-          tailBoundary.index + tailBoundary.separatorLength,
-        );
-
-        const event = this.parseSseEvent(rawEvent);
-        if (!event.data) {
-          tailBoundary = findEventBoundary(buffer);
-          continue;
-        }
-
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(event.data);
-          parsedEventsCount++;
-        } catch {
-          tailBoundary = findEventBoundary(buffer);
-          continue;
-        }
-
-        this.throwIfSseBizError(parsed);
-
-        const { text, thinking, messageId } = this.extractDeltaText(
-          parsed,
-          fragments,
-          patchState,
-        );
-        if (typeof messageId === "number") {
-          options?.onMessageId?.(messageId);
-        }
-        if (thinking) {
-          emittedThinkingChunks++;
-          yield { type: "thinking", content: thinking };
-        }
-        if (text) {
-          yield* routeTextChunk(text);
-        }
-
-        tailBoundary = findEventBoundary(buffer);
-      }
-
-      // Финальный частичный эвент без двойного перевода строки.
-      if (buffer.trim()) {
-        const event = this.parseSseEvent(buffer);
-        if (event.data) {
-          try {
-            const parsed = JSON.parse(event.data);
-            parsedEventsCount++;
-            this.throwIfSseBizError(parsed);
-            const { text, thinking, messageId } = this.extractDeltaText(
-              parsed,
-              fragments,
-              patchState,
-            );
-            if (typeof messageId === "number") {
-              options?.onMessageId?.(messageId);
-            }
-            if (thinking) {
-              emittedThinkingChunks++;
-              yield { type: "thinking", content: thinking };
-            }
-            if (text) {
-              yield* routeTextChunk(text);
-            }
-          } catch {
-            // ignore trailing non-json tail
-          }
-        }
-      }
-    } finally {
-      try {
-        reader.releaseLock();
-      } catch {
-        // ignore
-      }
-    }
-
-    // Сброс остатка буфера: парсинг tool_call либо отдача текста. Роутер
-    // корректно работает и в режиме без инструментов (отдаёт хвост как текст).
-    for (const chunk of router.finish()) {
-      if (chunk.type === "text") {
-        emittedTextChunks++;
-      }
-      yield chunk;
-    }
-
-    if (
-      parsedEventsCount > 0 &&
-      emittedTextChunks === 0 &&
-      emittedThinkingChunks === 0
-    ) {
-      log(
-        `[deepseek-api] stream completed without text chunks model=${modelType} parsedEvents=${parsedEventsCount} allowToolCalls=${allowToolCalls}`,
-      );
-    }
-
-    if (thinkingConfig.enabled && emittedThinkingChunks === 0) {
-      log(
-        `[deepseek-api] thinking enabled but no thinking chunks received model=${modelType} hasTools=${hasTools} allowToolCalls=${allowToolCalls}`,
-      );
-    }
-  }
-
-  async stopStream(
-    auth: DeepSeekAuthState,
-    sessionId: string,
-    messageId?: number,
-  ): Promise<void> {
-    const body: Record<string, unknown> = { chat_session_id: sessionId };
-    if (typeof messageId === "number" && Number.isFinite(messageId)) {
-      body.message_id = messageId;
-    }
-
-    await this.requestJson(STOP_STREAM_PATH, {
-      method: "POST",
-      auth,
-      body,
-      abortSignal: undefined,
-    });
-  }
-
-  private parseParentMessageId(parentId?: string): number | undefined {
-    if (!parentId) return undefined;
-    const num = Number(parentId);
-    return Number.isFinite(num) ? Math.floor(num) : undefined;
-  }
-
-  private resolveThinkingConfig(
-    resolvedModelId: string,
-    hasTools: boolean,
-    override?: "auto" | "on" | "off",
-  ): {
-    mode: "auto" | "on" | "off";
-    enabled: boolean;
-  } {
-    // Режим всегда "auto" (настройка убрана); override "off" приходит только от
-    // служебных запросов (коммиты/фиксы/inline-подсказки).
-    const mode: "auto" | "on" | "off" = override === "off" ? "off" : "auto";
-
-    const thinkingSupported = supportsThinking(
-      DEEPSEEK_MODELS,
-      resolvedModelId,
-    );
-    // При наличии tools thinking выключаем всегда (даже при mode="on"): связка
-    // reasoning + инструменты на этом бэкенде ненадёжна — модель уводит tool_call
-    // в reasoning-канал или обрывает ход после преамбулы. В обычном чате (без
-    // tools) thinking работает по настройке.
-    const enabled = thinkingSupported && !hasTools && mode !== "off";
-
-    return { mode, enabled };
-  }
-
-  private buildPromptFromMessages(
-    messages: AIMessage[],
-    toolsPrompt?: string,
-  ): string {
-    const parts: string[] = [];
-
-    if (toolsPrompt) {
-      // toolsPrompt уже содержит инструкцию про язык ответа.
-      parts.push(`System: ${toolsPrompt}`);
-    } else {
-      parts.push(
-        "System: Always answer in the same language as the latest user message. Never switch language unless the user explicitly asks.",
-      );
-    }
-
-    for (const msg of messages) {
-      if (msg.role === "system") continue;
-      const content = this.contentToString(msg.content).trim();
-      if (!content) continue;
-      const roleLabel = msg.role === "assistant" ? "Assistant" : "User";
-      parts.push(`${roleLabel}: ${content}`);
-    }
-
-    if (parts.length === 0) {
-      return "Assistant:";
-    }
-
-    return `${parts.join("\n\n")}\n\nAssistant:`;
-  }
-
-  private contentToString(content: AIMessage["content"]): string {
-    if (typeof content === "string") {
-      return content;
-    }
-    return content
-      .map((part) => (part.type === "text" ? part.text : "[image]"))
-      .join("\n");
-  }
-
-  private parseSseEvent(raw: string): { event: string; data: string } {
-    const event = { event: "", data: "" };
-    for (const line of raw.split(/\r?\n/)) {
-      if (line.startsWith("event:")) {
-        event.event = line.slice(6).trim();
-      } else if (line.startsWith("data:")) {
-        event.data += (event.data ? "\n" : "") + line.slice(5).trimStart();
-      }
-    }
-    return event;
-  }
-
-  private extractDeltaText(
-    value: unknown,
-    cache: Map<string, string>,
-    state: {
-      lastTarget: "text" | "thinking";
-      fragmentTargets: Array<"text" | "thinking">;
-    },
-  ): { text: string; thinking: string; messageId: number | null } {
-    let messageId: number | null = null;
-    let text = "";
-    let thinking = "";
-    const contentPathRe = /\/(content|text|answer)$/i;
-    const thinkingPathRe =
-      /\/(reasoning_content|reasoning|thinking|thinking_content|reasoning_text)$/i;
-    // Путь к контенту конкретного фрагмента: response/fragments/<N>/content,
-    // где N — индекс (в т.ч. отрицательный, -1 = последний фрагмент).
-    const fragmentContentPathRe = /\/fragments\/(-?\d+)\/content$/i;
-
-    // Определяет цель патча по его пути. Для фрагментов берём тип из
-    // зарегистрированного fragmentTargets, иначе — по thinking/content regex.
-    const resolveTargetForPath = (
-      p: string,
-    ): "text" | "thinking" | undefined => {
-      const fragMatch = fragmentContentPathRe.exec(p);
-      if (fragMatch) {
-        const rawIdx = Number(fragMatch[1]);
-        const list = state.fragmentTargets;
-        const idx = rawIdx < 0 ? list.length + rawIdx : rawIdx;
-        const target = list[idx];
-        if (target) return target;
-        // Тип фрагмента ещё не зарегистрирован — fallback на активную цель.
-        return state.lastTarget;
-      }
-      if (thinkingPathRe.test(p)) return "thinking";
-      if (contentPathRe.test(p)) return "text";
-      return undefined;
-    };
-    const thinkTypeRe = /^(think|reason|reasoning|cot)$/i;
-    const thinkingFieldRe =
-      /^(reasoning|reasoning_content|reasoning_text|thinking|thinking_content|thought|thoughts|cot)$/i;
-
-    const appendCached = (
-      cacheKey: string,
-      current: string,
-      target: "text" | "thinking",
-    ) => {
-      const previous = cache.get(cacheKey) ?? "";
-      const delta = current.startsWith(previous)
-        ? current.slice(previous.length)
-        : current;
-      cache.set(cacheKey, current);
-      if (delta) {
-        if (target === "thinking") {
-          thinking += delta;
-        } else {
-          text += delta;
-        }
-      }
-    };
-
-    const readNumericId = (raw: unknown): number | null => {
-      if (typeof raw === "number" && Number.isFinite(raw)) {
-        return raw;
-      }
-      if (typeof raw === "string" && raw.trim().length > 0) {
-        const parsed = Number(raw);
-        if (Number.isFinite(parsed)) {
-          return parsed;
-        }
-      }
-      return null;
-    };
-
-    const visit = (node: unknown, path: string): void => {
-      if (!node || typeof node !== "object") return;
-
-      const obj = node as Record<string, unknown>;
-
-      const responseMessageId = readNumericId(obj.response_message_id);
-      if (responseMessageId !== null) {
-        messageId = responseMessageId;
-      }
-      const rawMessageId = readNumericId(obj.message_id);
-      if (rawMessageId !== null) {
-        messageId = rawMessageId;
-      }
-      const normalizedRole =
-        typeof obj.role === "string" ? obj.role.toLowerCase() : "";
-      const rawId = readNumericId(obj.id);
-      if (rawId !== null && normalizedRole === "assistant") {
-        messageId = rawId;
-      }
-
-      // Сокращённый патч {"v":"..."} без пути: продолжение предыдущего APPEND.
-      // Раньше срабатывал только на верхнем уровне (path === "$") и всегда уходил
-      // в text — из-за чего такие патчи внутри BATCH (path вида "$.v.0")
-      // ТЕРЯЛИСЬ (пропадали первые символы при пакетной отдаче токенов), а
-      // thinking-продолжения утекали в text. Теперь обрабатываем на любой глубине
-      // и направляем в активную цель.
-      if (Object.keys(obj).length === 1 && typeof obj.v === "string") {
-        if (state.lastTarget === "thinking") {
-          thinking += obj.v;
-        } else {
-          text += obj.v;
-        }
-        return;
-      }
-
-      // DeepSeek patch-формат перехода think -> response часто идёт как:
-      // 1) {"p":"response/fragments","o":"APPEND","v":[{"type":"RESPONSE"|"THINK", ...}]}
-      // 2) {"p":"response/fragments/-1/content","o":"APPEND","v":"..."}
-      // Регистрацию фрагментов делаем ДО разбора APPEND, чтобы цель для
-      // последующего контента (think/response) уже была известна.
-      if (
-        obj.o === "APPEND" &&
-        obj.p === "response/fragments" &&
-        Array.isArray(obj.v)
-      ) {
-        for (let i = 0; i < obj.v.length; i++) {
-          const fragment = obj.v[i];
-          if (!fragment || typeof fragment !== "object") continue;
-          const frag = fragment as Record<string, unknown>;
-          const content = typeof frag.content === "string" ? frag.content : "";
-          const type =
-            typeof frag.type === "string" ? frag.type.toLowerCase() : "";
-          const target: "text" | "thinking" =
-            thinkTypeRe.test(type) || type === "thinking" ? "thinking" : "text";
-
-          // Запоминаем цель фрагмента по порядку — контент придёт отдельно по
-          // пути response/fragments/<index>/content.
-          state.fragmentTargets.push(target);
-          state.lastTarget = target;
-
-          if (!content) continue;
-
-          const fragId =
-            typeof frag.id === "number" || typeof frag.id === "string"
-              ? String(frag.id)
-              : `idx-${i}`;
-          const key = `${messageId ?? "unknown"}:${path}:fragment:${fragId}:content`;
-          appendCached(key, content, target);
-        }
-        return;
-      }
-
-      if (
-        obj.o === "APPEND" &&
-        typeof obj.p === "string" &&
-        typeof obj.v === "string"
-      ) {
-        const target = resolveTargetForPath(obj.p);
-        if (target) {
-          state.lastTarget = target;
-          if (target === "thinking") {
-            thinking += obj.v;
-          } else {
-            text += obj.v;
-          }
-        }
-        return;
-      }
-
-      if (
-        typeof obj.o === "string" &&
-        ["SET", "REPLACE", "UPDATE", "INSERT"].includes(obj.o) &&
-        typeof obj.p === "string" &&
-        typeof obj.v === "string"
-      ) {
-        const target = resolveTargetForPath(obj.p);
-        if (target) {
-          state.lastTarget = target;
-          const key = `${messageId ?? "unknown"}:${path}:${obj.p}`;
-          appendCached(key, obj.v, target);
-        }
-        return;
-      }
-
-      // Патч контента без явного "o" (наследует предыдущую операцию APPEND):
-      // {"p":"response/fragments/-1/content","v":"..."} или {"p":"response/content","v":"..."}.
-      // Раньше такие события полностью терялись.
-      if (
-        obj.o === undefined &&
-        typeof obj.p === "string" &&
-        typeof obj.v === "string"
-      ) {
-        const target = resolveTargetForPath(obj.p);
-        if (target) {
-          state.lastTarget = target;
-          if (target === "thinking") {
-            thinking += obj.v;
-          } else {
-            text += obj.v;
-          }
-          return;
-        }
-      }
-
-      if (obj.o === "BATCH" && Array.isArray(obj.v)) {
-        obj.v.forEach((item, idx) => visit(item, `${path}.v.${idx}`));
-        return;
-      }
-
-      if (
-        typeof obj.content === "string" &&
-        (typeof obj.type === "string" || normalizedRole === "assistant")
-      ) {
-        const normalizedType =
-          typeof obj.type === "string" ? obj.type.toLowerCase() : "";
-        const isContentCarrierType = [
-          "response",
-          "template_response",
-          "answer",
-          "assistant",
-          "text",
-          "message",
-        ].includes(normalizedType);
-        const isThinkingCarrierType =
-          thinkTypeRe.test(normalizedType) ||
-          normalizedType === "thinking" ||
-          normalizedType === "reasoning";
-        const normalizedPhase =
-          typeof obj.phase === "string" ? obj.phase.toLowerCase() : "";
-        const isThinkPhase = normalizedPhase === "think";
-
-        if (isThinkingCarrierType || isThinkPhase) {
-          const key = `${messageId ?? "unknown"}:${path}:${normalizedType || normalizedRole || "content"}`;
-          appendCached(key, obj.content, "thinking");
-        } else if (isContentCarrierType || normalizedRole === "assistant") {
-          const key = `${messageId ?? "unknown"}:${path}:${normalizedType || normalizedRole || "content"}`;
-          appendCached(key, obj.content, "text");
-        }
-      }
-
-      if (typeof obj.text === "string") {
-        const key = `${messageId ?? "unknown"}:${path}:text`;
-        appendCached(key, obj.text, "text");
-      }
-
-      if (typeof obj.reasoning_content === "string") {
-        const key = `${messageId ?? "unknown"}:${path}:reasoning_content`;
-        appendCached(key, obj.reasoning_content, "thinking");
-      }
-
-      if (typeof obj.reasoning === "string") {
-        const key = `${messageId ?? "unknown"}:${path}:reasoning`;
-        appendCached(key, obj.reasoning, "thinking");
-      }
-
-      if (typeof obj.thinking === "string") {
-        const key = `${messageId ?? "unknown"}:${path}:thinking`;
-        appendCached(key, obj.thinking, "thinking");
-      }
-
-      if (typeof obj.thinking_content === "string") {
-        const key = `${messageId ?? "unknown"}:${path}:thinking_content`;
-        appendCached(key, obj.thinking_content, "thinking");
-      }
-
-      if (obj.delta && typeof obj.delta === "object") {
-        const deltaObj = obj.delta as Record<string, unknown>;
-        const normalizedPhase =
-          typeof obj.phase === "string" ? obj.phase.toLowerCase() : "";
-        const isThinkPhase = normalizedPhase === "think";
-        for (const field of [
-          "content",
-          "reasoning_content",
-          "thinking",
-          "reasoning",
-          "text",
-          "answer",
-        ]) {
-          const val = deltaObj[field];
-          if (typeof val === "string") {
-            const key = `${messageId ?? "unknown"}:${path}:delta:${field}`;
-            const target =
-              field === "reasoning_content" ||
-              field === "thinking" ||
-              field === "reasoning" ||
-              (field === "content" && isThinkPhase)
-                ? "thinking"
-                : "text";
-            appendCached(key, val, target);
-          }
-        }
-      }
-
-      const maybeChoices = obj.choices;
-      if (
-        Array.isArray(maybeChoices) &&
-        maybeChoices[0] &&
-        typeof maybeChoices[0] === "object"
-      ) {
-        const c0 = maybeChoices[0] as {
-          delta?: { content?: unknown; reasoning_content?: unknown };
-        };
-        if (typeof c0.delta?.content === "string") {
-          text += c0.delta.content;
-        }
-        if (typeof c0.delta?.reasoning_content === "string") {
-          thinking += c0.delta.reasoning_content;
-        }
-      }
-
-      if (Array.isArray(node)) {
-        node.forEach((item, idx) => visit(item, `${path}.${idx}`));
-        return;
-      }
-
-      for (const [key, item] of Object.entries(obj)) {
-        if (key === "content" || key === "choices") {
-          continue;
-        }
-
-        if (typeof item === "string" && thinkingFieldRe.test(key)) {
-          const cacheKey = `${messageId ?? "unknown"}:${path}:field:${key}`;
-          appendCached(cacheKey, item, "thinking");
-          continue;
-        }
-
-        visit(item, `${path}.${key}`);
-      }
-    };
-
-    visit(value, "$");
-    return { text, thinking, messageId };
-  }
-
-  private throwIfSseBizError(parsed: unknown): void {
-    if (!parsed || typeof parsed !== "object") {
-      return;
-    }
-    const data = parsed as {
-      biz_code?: unknown;
-      biz_msg?: unknown;
-      data?: { biz_code?: unknown; biz_msg?: unknown; biz_data?: unknown };
-    };
-
-    const codeRaw = data.data?.biz_code ?? data.biz_code;
-    const msgRaw = data.data?.biz_msg ?? data.biz_msg;
-
-    if (typeof codeRaw === "number" && codeRaw !== 0) {
-      const msg = typeof msgRaw === "string" ? msgRaw : "Unknown error";
-      throw new ProviderError(
-        PROVIDER_ID,
-        `DeepSeek biz error ${codeRaw}: ${msg}`,
-      );
-    }
-  }
-
-  private throwCompletionHttpError(status: number, text: string): never {
-    let message = `HTTP ${status}: ${text.slice(0, 220)}`;
-    try {
-      const parsed = JSON.parse(text) as {
-        code?: number;
-        msg?: string;
-        data?: { biz_code?: number; biz_msg?: string };
-      };
-
-      if (parsed.code === 40002 || parsed.code === 40003) {
-        throw new AuthExpiredError(PROVIDER_ID);
-      }
-
-      if (typeof parsed.data?.biz_code === "number") {
-        message = `DeepSeek biz error ${parsed.data.biz_code}: ${parsed.data.biz_msg ?? ""}`;
-      } else if (typeof parsed.msg === "string" && parsed.msg) {
-        message = parsed.msg;
-      }
-    } catch (err) {
-      if (err instanceof AuthExpiredError) {
-        throw err;
-      }
-      // ignore parse errors
-    }
-
-    throw new ProviderError(PROVIDER_ID, message, status);
-  }
-
-  private async createPowHeader(
-    auth: DeepSeekAuthState,
-    targetPath: string,
-    abortSignal?: AbortSignal,
-  ): Promise<string> {
-    const json = await this.requestJson(CREATE_POW_CHALLENGE_PATH, {
-      method: "POST",
-      auth,
-      body: { target_path: targetPath },
-      abortSignal,
-    });
-
-    const challenge = json?.data?.biz_data?.challenge;
-    if (!challenge) {
-      throw new ProviderError(
-        PROVIDER_ID,
-        `PoW challenge not received: ${JSON.stringify(json).slice(0, 220)}`,
-      );
-    }
-
-    const answer = await this.solvePow(challenge);
-    const payload = {
-      algorithm: challenge.algorithm,
-      challenge: challenge.challenge,
-      salt: challenge.salt,
-      answer,
-      signature: challenge.signature,
-      target_path: targetPath,
-    };
-
-    return Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
-  }
-
-  private async requestJson(
-    path: string,
-    params: {
-      method: "GET" | "POST";
-      auth: DeepSeekAuthState;
-      body?: unknown;
-      abortSignal?: AbortSignal;
-    },
-  ): Promise<DeepSeekResponseJson> {
-    const response = await fetch(`${BASE_URL}${path}`, {
-      method: params.method,
-      headers: this.buildHeaders(params.auth),
-      body: params.body === undefined ? undefined : JSON.stringify(params.body),
-      signal: params.abortSignal,
-    });
-
-    const text = await response.text().catch(() => "");
-    let json: DeepSeekResponseJson | undefined;
-
-    try {
-      json = JSON.parse(text) as DeepSeekResponseJson;
-    } catch {
-      if (response.status === 401 || response.status === 403) {
-        throw new AuthExpiredError(PROVIDER_ID);
-      }
-      throw new ProviderError(
-        PROVIDER_ID,
-        `Invalid JSON from DeepSeek (${path}), status=${response.status}`,
-        response.status,
-      );
-    }
-
-    if (response.status === 401 || response.status === 403) {
-      throw new AuthExpiredError(PROVIDER_ID);
-    }
-
-    if (response.status === 429) {
-      const retryAfter = response.headers.get("retry-after");
-      throw new RateLimitError(
-        PROVIDER_ID,
-        retryAfter ? Number(retryAfter) * 1000 : undefined,
-      );
-    }
-
-    if (
-      json.code === 40002 ||
-      json.code === 40003 ||
-      json.data?.code === 40002 ||
-      json.data?.code === 40003
-    ) {
-      throw new AuthExpiredError(PROVIDER_ID);
-    }
-
-    const bizCode = json.data?.biz_code;
-    if (typeof bizCode === "number" && bizCode !== 0) {
-      throw new ProviderError(
-        PROVIDER_ID,
-        `DeepSeek biz error ${bizCode}: ${json.data?.biz_msg ?? ""}`,
-        response.status,
-      );
-    }
-
-    if (!response.ok) {
-      throw new ProviderError(
-        PROVIDER_ID,
-        `HTTP ${response.status}: ${text.slice(0, 220)}`,
-        response.status,
-      );
-    }
-
-    return json;
-  }
-
-  private buildHeaders(auth: DeepSeekAuthState): Record<string, string> {
-    const timezoneOffset = String(-new Date().getTimezoneOffset() * 60);
-    const headers: Record<string, string> = {
-      "User-Agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-      Accept: "*/*",
-      "Accept-Language": "en-US,en;q=0.9",
-      "Content-Type": "application/json",
-      Origin: BASE_URL,
-      Referer: `${BASE_URL}/`,
-      Cookie: auth.cookieHeader,
-      "X-App-Version": APP_VERSION,
-      "x-client-platform": "web",
-      "x-client-version": APP_VERSION,
-      "x-client-locale": "en",
-      "x-client-timezone-offset": timezoneOffset,
-    };
-
-    if (auth.token) {
-      headers.Authorization = `Bearer ${auth.token}`;
-    }
-
-    return headers;
-  }
-
-  private async solvePow(challenge: PowChallenge): Promise<number> {
-    if (challenge.algorithm !== "DeepSeekHashV1") {
-      throw new ProviderError(
-        PROVIDER_ID,
-        `Unsupported PoW algorithm: ${challenge.algorithm}`,
-      );
-    }
-
-    const expireAt = challenge.expire_at ?? challenge.expireAt;
-    if (!Number.isFinite(expireAt)) {
-      throw new ProviderError(PROVIDER_ID, "PoW challenge without expire_at");
-    }
-
-    const solver = await this.getWasmSolver();
-    const answer = solver.calculateHash(
-      challenge.algorithm,
-      challenge.challenge,
-      challenge.salt,
-      Number(challenge.difficulty),
-      Number(expireAt),
-    );
-
-    if (typeof answer !== "number" || !Number.isInteger(answer)) {
-      throw new ProviderError(
-        PROVIDER_ID,
-        "PoW solver returned an invalid answer",
-      );
-    }
-
-    return answer;
-  }
-
-  private async getWasmSolver(): Promise<DeepSeekHash> {
-    if (!wasmSolverPromise) {
-      wasmSolverPromise = DeepSeekHash.create(DEEPSEEK_SHA3_WASM);
-    }
-    return wasmSolverPromise;
-  }
+let wasmSolverPromise: Promise<DeepSeekHash> | undefined;
+
+function getWasmSolver(): Promise<DeepSeekHash> {
+  wasmSolverPromise ??= DeepSeekHash.create(DEEPSEEK_SHA3_WASM);
+  return wasmSolverPromise;
 }
 
+/** Port of DeepSeek's own wasm-bindgen glue for the sha3 PoW challenge. */
 class DeepSeekHash {
   private offset = 0;
-  private cachedUint8Memory: Uint8Array | null = null;
-  private readonly cachedTextEncoder = new TextEncoder();
+  private cachedMemory: Uint8Array | null = null;
+  private readonly encoder = new TextEncoder();
 
-  private constructor(private readonly wasmInstance: DeepSeekWasmExports) {}
+  private constructor(private readonly wasm: DeepSeekWasmExports) {}
 
   static async create(wasmUrl: string): Promise<DeepSeekHash> {
     const res = await fetch(wasmUrl);
     if (!res.ok) {
       throw new Error(`Failed to load PoW WASM: HTTP ${res.status}`);
     }
-    const wasmBuffer = await res.arrayBuffer();
-    const { instance } = await WebAssembly.instantiate(wasmBuffer, { wbg: {} });
+    const { instance } = await WebAssembly.instantiate(
+      await res.arrayBuffer(),
+      {
+        wbg: {},
+      },
+    );
     return new DeepSeekHash(instance.exports as unknown as DeepSeekWasmExports);
   }
 
   calculateHash(
-    algorithm: string,
     challenge: string,
     salt: string,
     difficulty: number,
     expireAt: number,
   ): number | undefined {
-    if (algorithm !== "DeepSeekHashV1") {
-      throw new Error(`Unsupported algorithm: ${algorithm}`);
-    }
-
-    const prefix = `${salt}_${expireAt}_`;
-    const retptr = this.wasmInstance.__wbindgen_add_to_stack_pointer(-16);
-
+    const retptr = this.wasm.__wbindgen_add_to_stack_pointer(-16);
     try {
-      const ptr0 = this.encodeString(
-        challenge,
-        this.wasmInstance.__wbindgen_export_0.bind(this.wasmInstance),
-        this.wasmInstance.__wbindgen_export_1.bind(this.wasmInstance),
-      );
+      const ptr0 = this.encodeString(challenge);
       const len0 = this.offset;
-
-      const ptr1 = this.encodeString(
-        prefix,
-        this.wasmInstance.__wbindgen_export_0.bind(this.wasmInstance),
-        this.wasmInstance.__wbindgen_export_1.bind(this.wasmInstance),
-      );
+      const ptr1 = this.encodeString(`${salt}_${expireAt}_`);
       const len1 = this.offset;
 
-      this.wasmInstance.wasm_solve(retptr, ptr0, len0, ptr1, len1, difficulty);
-      const dataView = new DataView(this.wasmInstance.memory.buffer);
-      const status = dataView.getInt32(retptr, true);
-      const value = dataView.getFloat64(retptr + 8, true);
-      return status === 0 ? undefined : value;
+      this.wasm.wasm_solve(retptr, ptr0, len0, ptr1, len1, difficulty);
+      const view = new DataView(this.wasm.memory.buffer);
+      const status = view.getInt32(retptr, true);
+      return status === 0 ? undefined : view.getFloat64(retptr + 8, true);
     } finally {
-      this.wasmInstance.__wbindgen_add_to_stack_pointer(16);
+      this.wasm.__wbindgen_add_to_stack_pointer(16);
     }
   }
 
-  private getCachedUint8Memory(): Uint8Array {
-    if (!this.cachedUint8Memory || this.cachedUint8Memory.byteLength === 0) {
-      this.cachedUint8Memory = new Uint8Array(this.wasmInstance.memory.buffer);
+  private memory(): Uint8Array {
+    if (!this.cachedMemory || this.cachedMemory.byteLength === 0) {
+      this.cachedMemory = new Uint8Array(this.wasm.memory.buffer);
     }
-    return this.cachedUint8Memory;
+    return this.cachedMemory;
   }
 
-  private encodeString(
-    text: string,
-    allocate: (size: number, align: number) => number,
-    reallocate: (
-      ptr: number,
-      oldSize: number,
-      newSize: number,
-      align: number,
-    ) => number,
-  ): number {
+  private encodeString(text: string): number {
     const strLength = text.length;
-    let ptr = allocate(strLength, 1) >>> 0;
-    const memory = this.getCachedUint8Memory();
-    let asciiLength = 0;
+    let ptr = this.wasm.__wbindgen_export_0(strLength, 1) >>> 0;
+    const memory = this.memory();
+    let written = 0;
 
-    for (; asciiLength < strLength; asciiLength += 1) {
-      const charCode = text.charCodeAt(asciiLength);
-      if (charCode > 127) {
-        break;
-      }
-      memory[ptr + asciiLength] = charCode;
+    for (; written < strLength; written++) {
+      const charCode = text.charCodeAt(written);
+      if (charCode > 127) break;
+      memory[ptr + written] = charCode;
     }
 
-    if (asciiLength !== strLength) {
-      let tail = text;
-      if (asciiLength > 0) {
-        tail = text.slice(asciiLength);
-      }
-
-      ptr = reallocate(ptr, strLength, asciiLength + tail.length * 3, 1) >>> 0;
-      const result = this.cachedTextEncoder.encodeInto(
+    if (written !== strLength) {
+      const tail = written > 0 ? text.slice(written) : text;
+      const capacity = written + tail.length * 3;
+      ptr = this.wasm.__wbindgen_export_1(ptr, strLength, capacity, 1) >>> 0;
+      const result = this.encoder.encodeInto(
         tail,
-        this.getCachedUint8Memory().subarray(
-          ptr + asciiLength,
-          ptr + asciiLength + tail.length * 3,
-        ),
+        this.memory().subarray(ptr + written, ptr + capacity),
       );
-      asciiLength += result.written;
-      ptr =
-        reallocate(ptr, asciiLength + tail.length * 3, asciiLength, 1) >>> 0;
+      written += result.written;
+      ptr = this.wasm.__wbindgen_export_1(ptr, capacity, written, 1) >>> 0;
     }
 
-    this.offset = asciiLength;
+    this.offset = written;
     return ptr;
   }
 }

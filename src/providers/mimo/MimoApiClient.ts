@@ -1,29 +1,24 @@
 import { createLogger, errToString } from "../../logger";
+import { toProviderError } from "../common/http";
+import { buildFlatTranscript } from "../common/messages";
+import { ignoreAbort, readText, sseEvents } from "../common/stream";
 import { StreamingToolCallRouter } from "../common/StreamingToolCallRouter";
-import {
-  buildToolsSystemPrompt,
-  selectToolsForPrompt,
-} from "../common/ToolCalling";
+import { buildToolsSystemPrompt } from "../common/ToolCalling";
 import type { AIMessage, AIRequestParams, AIStreamChunk } from "../types";
 import { AuthExpiredError, ProviderError, RateLimitError } from "../types";
-import { getMimoRoute, resolveMimoModelId } from "./MimoModels";
+import { getMimoRoute } from "./MimoModels";
 import type { MimoServer, MimoServerHandle } from "./MimoServer";
 
 const log = createLogger("mimo-api");
 
 const PROVIDER_ID = "ai-free-vscode-mimo";
-/** Максимальная пауза между событиями SSE, после которой считаем поток мёртвым. */
 const STREAM_IDLE_TIMEOUT_MS = 180000;
-/** Заголовок наших одноразовых сессий — по нему же их и подметаем. */
+/** Title of our throwaway sessions — also how the sweeper recognises them. */
 const SESSION_TITLE = "AI Free VSCode";
-/**
- * Возраст, начиная с которого сессия считается брошенной. Нужен, чтобы уборка
- * не задела запрос соседнего окна VS Code, работающего с тем же каталогом.
- */
+/** Age at which a session counts as abandoned (never touch a sibling window's). */
 const STALE_SESSION_AGE_MS = 10 * 60 * 1000;
-/** Сколько картинок максимум уходит в один запрос. */
 const MAX_IMAGES = 8;
-/** Пауза между abort и delete: сервер сворачивает генерацию не мгновенно. */
+/** The server needs a moment to wind generation down between abort and delete. */
 const ABORT_SETTLE_MS = 1000;
 
 const delay = (ms: number) =>
@@ -32,138 +27,62 @@ const delay = (ms: number) =>
     timer.unref?.();
   });
 
-interface SseEvent {
-  type: string;
-  properties?: Record<string, unknown>;
-}
-
 interface PendingItem {
   partID: string;
   kind: "delta" | "full";
   value: string;
 }
 
-/** Картинка, уходящая отдельной частью сообщения. */
+/** Image sent as a separate message part. */
 interface MimoAttachment {
   mime: string;
   filename: string;
-  /** data:image/…;base64,… — ссылки на внешние URL сервер не принимает. */
+  /** data:image/…;base64,… — the server rejects external URLs. */
   url: string;
 }
 
 export class MimoApiClient {
   /**
-   * Созданные, но ещё не удалённые сессии. Уборку мы не ждём (DELETE висит,
-   * пока сервер сворачивает генерацию), поэтому при остановке сервера её нужно
-   * успеть доделать — иначе одноразовая сессия остаётся в базе mimocode.
+   * Created but not yet deleted sessions. Cleanup is not awaited (DELETE blocks
+   * while the server winds generation down), so it has to finish before the
+   * server stops — otherwise the session stays in the mimocode database.
    */
   private readonly liveSessions = new Map<string, MimoServerHandle>();
-
-  /** Сервер, для которого уже прошла уборка брошенных сессий. */
   private sweptUrl?: string;
 
   constructor(private readonly server: MimoServer) {
     this.server.setBeforeStop(() => this.deleteLiveSessions());
   }
 
-  /**
-   * Подметает сессии, оставшиеся от прошлых запусков: если хост расширений упал
-   * или его убили посреди генерации, DELETE не долетал и сессия оставалась в
-   * базе mimocode навсегда. Разовая операция на каждый поднятый сервер.
-   */
-  private async sweepStaleSessions(handle: MimoServerHandle): Promise<void> {
-    const res = await fetch(`${handle.url}/session`, {
-      headers: { Authorization: handle.authHeader },
-    }).catch(() => undefined);
-    if (!res?.ok) {
-      return;
-    }
-
-    const sessions = (await res.json().catch(() => [])) as Array<{
-      id?: string;
-      title?: string;
-      directory?: string;
-      time?: { updated?: number };
-    }>;
-    if (!Array.isArray(sessions)) {
-      return;
-    }
-
-    // Директория сервера приходит уже разрешённой (/private/var/… против /var/…),
-    // поэтому сравниваем по суффиксу, а не строгим равенством.
-    const ours = handle.directory;
-    const cutoff = Date.now() - STALE_SESSION_AGE_MS;
-
-    const stale = sessions.filter(
-      (s) =>
-        !!s.id &&
-        s.title === SESSION_TITLE &&
-        !this.liveSessions.has(s.id) &&
-        (s.directory === ours || s.directory?.endsWith(ours) === true) &&
-        (s.time?.updated ?? 0) < cutoff,
-    );
-    if (stale.length === 0) {
-      return;
-    }
-
-    log.info(`sweeping ${stale.length} abandoned session(s)`);
-    await Promise.all(
-      stale.map((s) => this.deleteSession(handle, s.id as string)),
-    );
-  }
-
-  /** Удаляет всё, что не успело убраться само (вызывается перед остановкой). */
-  private async deleteLiveSessions(): Promise<void> {
-    const pending = [...this.liveSessions];
-    if (pending.length === 0) {
-      return;
-    }
-    log.debug(`cleaning up ${pending.length} live session(s) before shutdown`);
-    await Promise.all(
-      pending.map(([sessionID, handle]) =>
-        this.deleteSession(handle, sessionID),
-      ),
-    );
-  }
-
   async *sendMessageStream(
     params: AIRequestParams,
   ): AsyncIterable<AIStreamChunk> {
-    const modelId = resolveMimoModelId(params.model);
-    const route = getMimoRoute(modelId);
+    const route = getMimoRoute(params.model);
     if (!route) {
-      throw new ProviderError(PROVIDER_ID, `Unknown MiMo model: ${params.model}`);
+      throw new ProviderError(
+        PROVIDER_ID,
+        `Unknown MiMo model: ${params.model}`,
+      );
     }
 
     const handle = await this.server.ensure();
-
     if (this.sweptUrl !== handle.url) {
       this.sweptUrl = handle.url;
-      // В фоне: уборка чужого мусора не должна задерживать ответ пользователю.
+      // In the background: cleaning old junk must not delay the answer.
       void this.sweepStaleSessions(handle).catch(() => undefined);
     }
 
     const hasTools = (params.tools?.length ?? 0) > 0;
-    const allowToolCalls = params.toolMode !== "none" && hasTools;
-
-    let toolsPrompt = "";
-    if (hasTools && params.tools?.length) {
-      toolsPrompt = buildToolsSystemPrompt(
-        selectToolsForPrompt(
-          params.tools,
-          this.lastUserText(params.messages),
-          params.toolMode,
-        ),
-      );
-    }
-
-    const content = this.buildContent(params.messages, toolsPrompt);
-    const images = this.collectImages(params.messages);
+    const content = buildFlatTranscript(
+      params.messages,
+      hasTools ? buildToolsSystemPrompt(params.tools ?? []) : "",
+    );
+    const images = collectImages(params.messages);
     log.info(
       `request model=${route.providerID}/${route.modelID} hasTools=${hasTools} contentChars=${content.length} images=${images.length}`,
     );
 
-    // SSE подписываемся ДО отправки сообщения, иначе первые дельты потеряются.
+    // Subscribe to SSE BEFORE posting, otherwise the first deltas are lost.
     const streamAbort = new AbortController();
     const onAbort = () => streamAbort.abort();
     params.abortSignal?.addEventListener("abort", onAbort);
@@ -172,21 +91,21 @@ export class MimoApiClient {
     let finished = false;
 
     try {
-      const eventsResponse = await fetch(`${handle.url}/event`, {
+      const events = await fetch(`${handle.url}/event`, {
         headers: { Authorization: handle.authHeader },
         signal: streamAbort.signal,
       });
-      if (!eventsResponse.ok || !eventsResponse.body) {
+      if (!events.ok || !events.body) {
         throw new ProviderError(
           PROVIDER_ID,
-          `MiMo CLI event stream failed: HTTP ${eventsResponse.status}`,
+          `MiMo CLI event stream failed: HTTP ${events.status}`,
         );
       }
 
       sessionID = await this.createSession(handle);
 
-      // POST завершается только по окончании генерации, поэтому не ждём его
-      // здесь — читаем события, а ошибку запроса подхватываем из postError.
+      // The POST only resolves once generation ends, so it is not awaited here;
+      // its failure is picked up through postError.
       let postError: unknown;
       const posted = this.postMessage(
         handle,
@@ -201,19 +120,17 @@ export class MimoApiClient {
       });
 
       yield* this.consumeEvents(
-        eventsResponse.body,
+        events.body,
         sessionID,
-        allowToolCalls,
-        streamAbort,
+        params.toolMode !== "none" && hasTools,
+        streamAbort.signal,
         () => postError,
       );
 
       finished = true;
       if (!params.abortSignal?.aborted) {
         await posted.catch(() => undefined);
-        if (postError) {
-          throw postError;
-        }
+        if (postError) throw postError;
       }
     } catch (err) {
       if (params.abortSignal?.aborted) {
@@ -224,34 +141,36 @@ export class MimoApiClient {
     } finally {
       params.abortSignal?.removeEventListener("abort", onAbort);
       streamAbort.abort();
-      if (sessionID) {
-        // Не ждём уборку: DELETE висит, пока сервер не свернёт генерацию, а нам
-        // важно отпустить вызывающего сразу после отмены.
-        void this.cleanupSession(handle, sessionID, finished);
-      }
+      // Not awaited: DELETE blocks until generation stops, and the caller has
+      // to be released right after cancellation.
+      if (sessionID) void this.cleanupSession(handle, sessionID, finished);
     }
   }
 
-  // ─── HTTP-обёртки над локальным сервером mimocode ───────────────────────
+  // ─── Local mimocode server ────────────────────────────────────────────────
+
+  private sessionUrl(handle: MimoServerHandle, suffix = ""): string {
+    return `${handle.url}/session${suffix}?directory=${encodeURIComponent(
+      handle.directory,
+    )}`;
+  }
 
   private async createSession(handle: MimoServerHandle): Promise<string> {
-    const res = await fetch(
-      `${handle.url}/session?directory=${encodeURIComponent(handle.directory)}`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: handle.authHeader,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ title: SESSION_TITLE }),
+    const res = await fetch(this.sessionUrl(handle), {
+      method: "POST",
+      headers: {
+        Authorization: handle.authHeader,
+        "Content-Type": "application/json",
       },
-    );
+      body: JSON.stringify({ title: SESSION_TITLE }),
+    });
     if (!res.ok) {
       throw new ProviderError(
         PROVIDER_ID,
         `MiMo CLI session create failed: HTTP ${res.status}`,
       );
     }
+
     const session = (await res.json()) as { id?: string };
     if (!session.id) {
       throw new ProviderError(PROVIDER_ID, "MiMo CLI returned no session id");
@@ -269,103 +188,135 @@ export class MimoApiClient {
     images: MimoAttachment[],
     signal: AbortSignal,
   ): Promise<void> {
-    const res = await fetch(
-      `${handle.url}/session/${sessionID}/message?directory=${encodeURIComponent(handle.directory)}`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: handle.authHeader,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          agent: this.server.agent,
-          model: { providerID: route.providerID, modelID: route.modelID },
-          // Текст первым, картинки следом — тот же порядок, что шлёт `mimo run -f`.
-          parts: [
-            { type: "text", text: content },
-            ...images.map((image) => ({
-              type: "file",
-              mime: image.mime,
-              filename: image.filename,
-              url: image.url,
-            })),
-          ],
-        }),
-        signal,
+    const res = await fetch(this.sessionUrl(handle, `/${sessionID}/message`), {
+      method: "POST",
+      headers: {
+        Authorization: handle.authHeader,
+        "Content-Type": "application/json",
       },
-    );
+      body: JSON.stringify({
+        agent: this.server.agent,
+        model: route,
+        // Text first, images after — the order `mimo run -f` uses.
+        parts: [
+          { type: "text", text: content },
+          ...images.map((image) => ({ type: "file", ...image })),
+        ],
+      }),
+      signal,
+    });
+
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw this.toProviderError(res.status, text);
+      throw toProviderError(PROVIDER_ID, res.status, text);
     }
     await res.json().catch(() => undefined);
   }
 
-  /** Гасит и удаляет одноразовую сессию в фоне (ошибки не важны). */
+  /** Stops and deletes a throwaway session in the background. */
   private async cleanupSession(
     handle: MimoServerHandle,
     sessionID: string,
     finished: boolean,
   ): Promise<void> {
     if (!finished) {
-      await this.abortSession(handle, sessionID);
+      await fetch(this.sessionUrl(handle, `/${sessionID}/abort`), {
+        method: "POST",
+        headers: { Authorization: handle.authHeader },
+      }).catch(() => undefined);
       await delay(ABORT_SETTLE_MS);
     }
     await this.deleteSession(handle, sessionID);
-  }
-
-  private async abortSession(
-    handle: MimoServerHandle,
-    sessionID: string,
-  ): Promise<void> {
-    await fetch(
-      `${handle.url}/session/${sessionID}/abort?directory=${encodeURIComponent(handle.directory)}`,
-      { method: "POST", headers: { Authorization: handle.authHeader } },
-    ).catch(() => undefined);
   }
 
   private async deleteSession(
     handle: MimoServerHandle,
     sessionID: string,
   ): Promise<void> {
-    // Сессии одноразовые: весь контекст мы шлём заново каждым запросом.
-    const res = await fetch(
-      `${handle.url}/session/${sessionID}?directory=${encodeURIComponent(handle.directory)}`,
-      { method: "DELETE", headers: { Authorization: handle.authHeader } },
-    ).catch((err: unknown) => {
+    const res = await fetch(this.sessionUrl(handle, `/${sessionID}`), {
+      method: "DELETE",
+      headers: { Authorization: handle.authHeader },
+    }).catch((err: unknown) => {
       log.debug(`session delete failed: ${sessionID} — ${errToString(err)}`);
       return undefined;
     });
 
-    if (res && !res.ok) {
-      log.warn(`session delete rejected: ${sessionID} — HTTP ${res.status}`);
-      return;
-    }
-    if (res) {
+    if (!res) return;
+    if (res.ok) {
       this.liveSessions.delete(sessionID);
+    } else {
+      log.warn(`session delete rejected: ${sessionID} — HTTP ${res.status}`);
     }
   }
 
-  // ─── Разбор потока событий ──────────────────────────────────────────────
+  /**
+   * Removes sessions left by earlier runs: if the extension host died mid
+   * generation the DELETE never landed and the session stayed forever. Runs
+   * once per started server.
+   */
+  private async sweepStaleSessions(handle: MimoServerHandle): Promise<void> {
+    const res = await fetch(`${handle.url}/session`, {
+      headers: { Authorization: handle.authHeader },
+    }).catch(() => undefined);
+    if (!res?.ok) return;
+
+    const sessions = (await res.json().catch(() => [])) as Array<{
+      id?: string;
+      title?: string;
+      directory?: string;
+      time?: { updated?: number };
+    }>;
+    if (!Array.isArray(sessions)) return;
+
+    // The server resolves its directory (/private/var/… vs /var/…), so compare
+    // by suffix rather than equality.
+    const cutoff = Date.now() - STALE_SESSION_AGE_MS;
+    const stale = sessions.filter(
+      (s) =>
+        !!s.id &&
+        s.title === SESSION_TITLE &&
+        !this.liveSessions.has(s.id) &&
+        (s.directory === handle.directory ||
+          s.directory?.endsWith(handle.directory) === true) &&
+        (s.time?.updated ?? 0) < cutoff,
+    );
+    if (stale.length === 0) return;
+
+    log.info(`sweeping ${stale.length} abandoned session(s)`);
+    await Promise.all(
+      stale.map((s) => this.deleteSession(handle, s.id as string)),
+    );
+  }
+
+  private async deleteLiveSessions(): Promise<void> {
+    const pending = [...this.liveSessions];
+    if (pending.length === 0) return;
+    log.debug(`cleaning up ${pending.length} live session(s) before shutdown`);
+    await Promise.all(
+      pending.map(([sessionID, handle]) =>
+        this.deleteSession(handle, sessionID),
+      ),
+    );
+  }
+
+  // ─── Event stream ─────────────────────────────────────────────────────────
 
   /**
-   * Превращает SSE-поток сервера в чанки провайдера.
+   * Turns the server's SSE stream into provider chunks.
    *
-   * Части сообщения приходят вперемешку с эхо пользовательского сообщения,
-   * а роль сообщения может стать известна ПОСЛЕ его частей, поэтому неготовые
-   * куски складываем в очередь и отдаём строго в исходном порядке.
+   * Message parts arrive interleaved with the echo of the user message, and a
+   * message's role can become known AFTER its parts — so unclassified pieces
+   * queue up and are released strictly in arrival order.
    */
   private async *consumeEvents(
     body: ReadableStream<Uint8Array>,
     sessionID: string,
     allowToolCalls: boolean,
-    streamAbort: AbortController,
+    signal: AbortSignal,
     getPostError: () => unknown,
   ): AsyncIterable<AIStreamChunk> {
-    const router = new StreamingToolCallRouter(
-      allowToolCalls,
-      (m) => log.debug(m),
-      "",
+    const router = new StreamingToolCallRouter(allowToolCalls, (m) =>
+      log.debug(m),
     );
 
     const roleByMessage = new Map<string, string>();
@@ -377,7 +328,7 @@ export class MimoApiClient {
     let thinkingChars = 0;
     let usageEmitted = false;
 
-    /** Отдаёт из очереди всё, что уже можно классифицировать. */
+    /** Releases everything at the head of the queue that can be classified. */
     function* flush(): Iterable<AIStreamChunk> {
       while (pending.length > 0) {
         const item = pending[0];
@@ -386,10 +337,7 @@ export class MimoApiClient {
         const role = roleByMessage.get(info.messageID);
         if (!role) return;
         pending.shift();
-
-        if (role !== "assistant") {
-          continue;
-        }
+        if (role !== "assistant") continue;
 
         const already = emitted.get(item.partID) ?? 0;
         let text: string;
@@ -413,12 +361,26 @@ export class MimoApiClient {
       }
     }
 
-    stream: for await (const event of this.readSse(body, streamAbort.signal)) {
-      if (getPostError()) {
-        break stream;
-      }
+    const source = ignoreAbort(
+      readText(body, {
+        providerId: PROVIDER_ID,
+        idleTimeoutMs: STREAM_IDLE_TIMEOUT_MS,
+        signal,
+      }),
+      signal,
+    );
 
-      const props = (event.properties ?? {}) as Record<string, unknown>;
+    stream: for await (const raw of sseEvents(source)) {
+      if (getPostError()) break stream;
+
+      let event: { type?: string; properties?: Record<string, unknown> };
+      try {
+        event = JSON.parse(raw.data);
+      } catch (err) {
+        log.debug(`sse parse failed — ${errToString(err)}`);
+        continue;
+      }
+      const props = event.properties ?? {};
 
       switch (event.type) {
         case "message.updated": {
@@ -431,16 +393,16 @@ export class MimoApiClient {
               }
             | undefined;
           if (!info?.id || info.sessionID !== sessionID) break;
-          if (info.role) {
-            roleByMessage.set(info.id, info.role);
-          }
+          if (info.role) roleByMessage.set(info.id, info.role);
           yield* flush();
-          if (info.role === "assistant" && !usageEmitted) {
-            const usage = this.toUsageChunk(info.tokens);
-            if (usage) {
-              usageEmitted = true;
-              yield usage;
-            }
+
+          const usage =
+            info.role === "assistant" && !usageEmitted
+              ? toUsageChunk(info.tokens)
+              : undefined;
+          if (usage) {
+            usageEmitted = true;
+            yield usage;
           }
           break;
         }
@@ -489,23 +451,17 @@ export class MimoApiClient {
           break;
         }
 
-        case "session.error": {
+        case "session.error":
           if (props.sessionID && props.sessionID !== sessionID) break;
-          throw this.toSessionError(props.error);
-        }
+          throw toSessionError(props.error);
 
-        case "session.idle": {
+        case "session.idle":
           if (props.sessionID !== sessionID) break;
           log.debug("session idle — generation finished");
           yield* flush();
           break stream;
-        }
-
-        default:
-          break;
       }
 
-      // Роутер увидел границу фейкового следующего хода — дальше только мусор.
       if (router.cut) {
         log.debug("transcript boundary detected — stopping stream");
         break stream;
@@ -520,207 +476,65 @@ export class MimoApiClient {
       log.warn("stream finished without content");
     }
   }
+}
 
-  /** Разбирает `text/event-stream` в объекты событий. */
-  private async *readSse(
-    body: ReadableStream<Uint8Array>,
-    signal: AbortSignal,
-  ): AsyncIterable<SseEvent> {
-    const reader = body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    const readWithTimeout = async (): Promise<
-      ReadableStreamReadResult<Uint8Array>
-    > => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new ProviderError(PROVIDER_ID, "MiMo stream timeout")),
-          STREAM_IDLE_TIMEOUT_MS,
-        );
-      });
-      try {
-        return await Promise.race([reader.read(), timeout]);
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
-    };
-
-    try {
-      while (!signal.aborted) {
-        const { done, value } = await readWithTimeout();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        let idx: number;
-        while ((idx = buffer.indexOf("\n\n")) !== -1) {
-          const raw = buffer.slice(0, idx);
-          buffer = buffer.slice(idx + 2);
-          const dataLine = raw
-            .split("\n")
-            .find((line) => line.startsWith("data:"));
-          if (!dataLine) continue;
-          const payload = dataLine.slice(5).trim();
-          if (!payload) continue;
-          try {
-            yield JSON.parse(payload) as SseEvent;
-          } catch (err) {
-            log.debug(`sse parse failed — ${errToString(err)}`);
-          }
-        }
-      }
-    } catch (err) {
-      const aborted =
-        signal.aborted ||
-        err instanceof DOMException ||
-        (err instanceof Error && /abort/i.test(err.message));
-      if (!aborted) throw err;
-      log.debug("sse aborted");
-    } finally {
-      await reader.cancel().catch(() => undefined);
-      try {
-        reader.releaseLock();
-      } catch {
-        // ignore
-      }
-    }
+function toUsageChunk(tokens: unknown): AIStreamChunk | undefined {
+  const t = tokens as { input?: number; output?: number } | null;
+  if (typeof t?.input !== "number" || typeof t.output !== "number") {
+    return undefined;
   }
+  if (t.input === 0 && t.output === 0) return undefined;
+  return { type: "usage", promptTokens: t.input, completionTokens: t.output };
+}
 
-  // ─── Вспомогательное ────────────────────────────────────────────────────
+function toSessionError(error: unknown): Error {
+  const text = typeof error === "string" ? error : JSON.stringify(error ?? {});
+  log.error(`session error: ${text.slice(0, 400)}`);
 
-  private toUsageChunk(tokens: unknown): AIStreamChunk | undefined {
-    if (!tokens || typeof tokens !== "object") return undefined;
-    const t = tokens as { input?: number; output?: number };
-    if (typeof t.input !== "number" || typeof t.output !== "number") {
-      return undefined;
-    }
-    if (t.input === 0 && t.output === 0) return undefined;
-    return {
-      type: "usage",
-      promptTokens: t.input,
-      completionTokens: t.output,
-    };
+  if (/401|403|unauthor|not logged in|no credentials/i.test(text)) {
+    return new AuthExpiredError(PROVIDER_ID);
   }
-
-  private toSessionError(error: unknown): Error {
-    const text =
-      typeof error === "string" ? error : JSON.stringify(error ?? {});
-    log.error(`session error: ${text.slice(0, 400)}`);
-
-    if (/401|403|unauthor|not logged in|no credentials/i.test(text)) {
-      return new AuthExpiredError(PROVIDER_ID);
-    }
-    if (/429|rate.?limit|quota|too many requests/i.test(text)) {
-      return new RateLimitError(PROVIDER_ID);
-    }
-    return new ProviderError(PROVIDER_ID, `MiMo error: ${text.slice(0, 300)}`);
+  if (/429|rate.?limit|quota|too many requests/i.test(text)) {
+    return new RateLimitError(PROVIDER_ID);
   }
+  return new ProviderError(PROVIDER_ID, `MiMo error: ${text.slice(0, 300)}`);
+}
 
-  private toProviderError(status: number, text: string): Error {
-    if (status === 401 || status === 403) {
-      return new AuthExpiredError(PROVIDER_ID);
-    }
-    if (status === 429) {
-      return new RateLimitError(PROVIDER_ID);
-    }
-    return new ProviderError(
-      PROVIDER_ID,
-      `MiMo CLI request failed: HTTP ${status} ${text.slice(0, 200)}`,
-      status,
-    );
-  }
+/**
+ * Images from the history go as separate file parts; the text keeps an
+ * `[image]` placeholder where they were.
+ */
+function collectImages(messages: AIMessage[]): MimoAttachment[] {
+  const images: MimoAttachment[] = [];
+  let skipped = 0;
 
-  /**
-   * mimocode принимает одно пользовательское сообщение, поэтому переписку
-   * «сплющиваем» в единый текст с ролевыми префиксами (как у Kimi/Qwen),
-   * а протокол инструментов дописываем в самый конец.
-   */
-  private buildContent(messages: AIMessage[], toolsPrompt: string): string {
-    const systems: string[] = [];
-    const turns: string[] = [];
+  for (const message of messages) {
+    if (typeof message.content === "string") continue;
 
-    for (const msg of messages) {
-      const content = this.contentToString(msg.content).trim();
-      if (!content) continue;
-      if (msg.role === "system") {
-        systems.push(content);
+    for (const part of message.content) {
+      if (part.type !== "image_url") continue;
+
+      const url = part.imageUrl.url.trim();
+      const match = /^data:(image\/[\w.+-]+);base64,/i.exec(url);
+      if (!match || images.length >= MAX_IMAGES) {
+        skipped++;
         continue;
       }
-      const label = msg.role === "assistant" ? "assistant" : "user";
-      turns.push(`${label}:${content}`);
-    }
 
-    const languageGuard =
-      "Always answer in the same language as the latest user message. Never switch language unless the user explicitly asks.";
-    const parts = [
-      `system:${[languageGuard, ...systems].join("\n")}`,
-      ...turns,
-    ];
-
-    let content = parts.join("\n");
-    if (toolsPrompt) {
-      content = `${content.trim()}\n\n${toolsPrompt}`;
+      const mime = match[1].toLowerCase();
+      const ext = mime.split("/")[1]?.replace("jpeg", "jpg") ?? "png";
+      images.push({
+        mime,
+        filename: `image-${images.length + 1}.${ext}`,
+        url,
+      });
     }
-    return content;
   }
 
-  /**
-   * Картинки из истории — отдельными file-частями: в тексте они остаются
-   * пометкой `[image]`, а сюда попадает сам файл.
-   */
-  private collectImages(messages: AIMessage[]): MimoAttachment[] {
-    const images: MimoAttachment[] = [];
-    let skipped = 0;
-
-    for (const message of messages) {
-      if (typeof message.content === "string") continue;
-
-      for (const part of message.content) {
-        if (part.type !== "image_url") continue;
-
-        const url = part.imageUrl.url.trim();
-        const match = /^data:(image\/[\w.+-]+);base64,/i.exec(url);
-        if (!match) {
-          skipped++;
-          continue;
-        }
-        if (images.length >= MAX_IMAGES) {
-          skipped++;
-          continue;
-        }
-
-        const mime = match[1].toLowerCase();
-        const ext = mime.split("/")[1]?.replace("jpeg", "jpg") ?? "png";
-        images.push({
-          mime,
-          filename: `image-${images.length + 1}.${ext}`,
-          url,
-        });
-      }
-    }
-
-    if (skipped > 0) {
-      log.warn(
-        `${skipped} image(s) not sent: only base64 data URLs are accepted, max ${MAX_IMAGES} per request`,
-      );
-    }
-    return images;
+  if (skipped > 0) {
+    log.warn(
+      `${skipped} image(s) not sent: only base64 data URLs are accepted, max ${MAX_IMAGES} per request`,
+    );
   }
-
-  private lastUserText(messages: AIMessage[]): string {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === "user") {
-        return this.contentToString(messages[i].content);
-      }
-    }
-    return "";
-  }
-
-  private contentToString(content: AIMessage["content"]): string {
-    if (typeof content === "string") return content;
-    return content
-      .map((part) => (part.type === "text" ? part.text : "[image]"))
-      .join("\n");
-  }
+  return images;
 }

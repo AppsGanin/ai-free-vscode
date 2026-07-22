@@ -12,25 +12,25 @@ const execFileAsync = promisify(execFile);
 const IS_WINDOWS = process.platform === "win32";
 const BIN_NAMES = IS_WINDOWS ? ["mimo.cmd", "mimo.exe", "mimo"] : ["mimo"];
 
-/** Сколько держим в памяти результат `mimo models` (список моделей меняется редко). */
-const MODELS_CACHE_TTL_MS = 5 * 60 * 1000;
+/** How long `mimo models` is cached — the list rarely changes. */
+const CACHE_TTL_MS = 5 * 60 * 1000;
 const EXEC_TIMEOUT_MS = 20000;
 
 let cachedBinary: { path: string | undefined; at: number } | undefined;
 let cachedModels: { routes: string[]; at: number } | undefined;
 
-/** Сбрасывает кэши (после логина/логаута/установки CLI). */
+/** Drops the caches after a login/logout or a fresh CLI install. */
 export function invalidateMimoCliCache(): void {
   cachedBinary = undefined;
   cachedModels = undefined;
 }
 
 /**
- * Нейтральная рабочая директория для всех вызовов CLI.
+ * Neutral working directory for every CLI call.
  *
- * Хост расширений стартует с cwd `/`, а mimocode отказывается работать в корне
- * ФС («filesystem root is not a valid project directory»). Проект пользователя
- * тоже не берём: индексировать его и создавать там сессии незачем.
+ * The extension host starts with cwd `/`, and mimocode refuses to run in the
+ * filesystem root. The user's project is not used either: there is no reason to
+ * index it or create sessions inside it.
  */
 export async function mimoWorkDir(): Promise<string> {
   const dir = path.join(os.tmpdir(), "free-ai-vscode-mimo");
@@ -38,49 +38,13 @@ export async function mimoWorkDir(): Promise<string> {
   return dir;
 }
 
-async function isExecutable(file: string): Promise<boolean> {
-  try {
-    await access(file, IS_WINDOWS ? constants.F_OK : constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Кандидаты на путь к бинарнику: настройка → штатный installer-путь → PATH. */
-function binaryCandidates(): string[] {
-  const candidates: string[] = [];
-
-  const configured = vscode.workspace
-    .getConfiguration("freeAI")
-    .get<string>("mimo.path", "")
-    .trim();
-  if (configured) {
-    candidates.push(configured);
-  }
-
-  const home = os.homedir();
-  for (const name of BIN_NAMES) {
-    candidates.push(path.join(home, ".mimocode", "bin", name));
-  }
-
-  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
-    if (!dir) continue;
-    for (const name of BIN_NAMES) {
-      candidates.push(path.join(dir, name));
-    }
-  }
-
-  return candidates;
-}
-
 /**
- * Путь к исполняемому `mimo` или undefined, если CLI не установлен.
- * Результат кэшируется (в т.ч. отрицательный — на короткое время).
+ * Path to an executable `mimo`, or undefined when the CLI is not installed.
+ * The result is cached, including the negative one (briefly).
  */
 export async function resolveMimoBinary(): Promise<string | undefined> {
   const now = Date.now();
-  if (cachedBinary && now - cachedBinary.at < MODELS_CACHE_TTL_MS) {
+  if (cachedBinary && now - cachedBinary.at < CACHE_TTL_MS) {
     return cachedBinary.path;
   }
 
@@ -98,14 +62,12 @@ export async function resolveMimoBinary(): Promise<string | undefined> {
 }
 
 /**
- * Список моделей, которые CLI реально может дать (`mimo models` печатает
- * `providerID/modelID` по строке на модель). Пустой список = CLI не настроен.
+ * Models the CLI can actually serve (`mimo models` prints one
+ * `providerID/modelID` per line). An empty list means it is not set up.
  */
-export async function listCliModelRoutes(
-  force = false,
-): Promise<string[]> {
+export async function listCliModelRoutes(force = false): Promise<string[]> {
   const now = Date.now();
-  if (!force && cachedModels && now - cachedModels.at < MODELS_CACHE_TTL_MS) {
+  if (!force && cachedModels && now - cachedModels.at < CACHE_TTL_MS) {
     return cachedModels.routes;
   }
 
@@ -129,8 +91,8 @@ export async function listCliModelRoutes(
       .map((line) => line.trim())
       .filter((line) => /^[\w.-]+\/[\w.-]+$/.test(line));
 
-    // Это ВЕСЬ вывод CLI, а не то, что мы показываем: до списка расширения он
-    // ещё фильтруется по MIMO_MODEL_ROUTES (остаётся только бесплатный канал).
+    // This is the CLI's whole output, not what we expose: it is filtered
+    // against MIMO_MODEL_ROUTES afterwards (only the free channel survives).
     clog.debug(`models reported by CLI: ${routes.join(", ") || "(none)"}`);
     cachedModels = { routes, at: now };
     return routes;
@@ -142,8 +104,8 @@ export async function listCliModelRoutes(
 }
 
 /**
- * Окружение для дочерних процессов CLI: гасим автообновление и всё, что
- * замедляет холодный старт и нам не нужно (скиллы, cron, импорт Claude Code).
+ * Environment for CLI child processes: disables auto-update and everything that
+ * slows a cold start down without being useful here (skills, cron, imports).
  */
 export function cliEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   return {
@@ -157,11 +119,43 @@ export function cliEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   };
 }
 
-/** Открывает терминал VS Code с командами CLI (логин/установка выполняются в нём). */
+/** Opens a VS Code terminal running the given CLI commands (install/setup). */
 export function runInTerminal(name: string, ...commands: string[]): void {
   const terminal = vscode.window.createTerminal({ name });
   terminal.show(true);
   for (const command of commands) {
     terminal.sendText(command, true);
+  }
+}
+
+/** Candidate paths: the setting, then the installer location, then PATH. */
+function binaryCandidates(): string[] {
+  const candidates: string[] = [];
+
+  const configured = vscode.workspace
+    .getConfiguration("freeAI")
+    .get<string>("mimo.path", "")
+    .trim();
+  if (configured) candidates.push(configured);
+
+  const dirs = [
+    path.join(os.homedir(), ".mimocode", "bin"),
+    ...(process.env.PATH ?? "").split(path.delimiter).filter(Boolean),
+  ];
+  for (const dir of dirs) {
+    for (const name of BIN_NAMES) {
+      candidates.push(path.join(dir, name));
+    }
+  }
+
+  return candidates;
+}
+
+async function isExecutable(file: string): Promise<boolean> {
+  try {
+    await access(file, IS_WINDOWS ? constants.F_OK : constants.X_OK);
+    return true;
+  } catch {
+    return false;
   }
 }

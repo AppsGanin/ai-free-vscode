@@ -1,17 +1,11 @@
-import * as os from "os";
-import * as path from "path";
-import { chromium } from "playwright";
+import type { BrowserContext } from "playwright";
+import { launchPersistentProfile, profileDir } from "../common/browserAuth";
 
 /**
- * Постоянная директория профиля браузера.
- * В ней Chromium хранит cookies живой сессии Qwen — их использует и авторизация,
- * и браузерный fallback при блокировке Aliyun WAF.
+ * Shared profile directory. It holds the cookies of the live Qwen session, used
+ * both by sign-in and by the browser fallback when the Aliyun WAF blocks us.
  */
-export const BROWSER_DATA_DIR = path.join(
-  os.homedir(),
-  ".ai-free-vscode",
-  "browser-profile",
-);
+export const BROWSER_DATA_DIR = profileDir("browser-profile");
 
 const LAUNCH_ARGS = [
   "--no-sandbox",
@@ -21,42 +15,29 @@ const LAUNCH_ARGS = [
   "--disable-infobars",
 ];
 
-// Уводим окно далеко за пределы экрана: браузер остаётся headed (рендеринг и
-// фингерпринт настоящие — анти-бот не срабатывает), но не мешает пользователю.
+// Far off-screen: the browser stays headed (real rendering and fingerprint, so
+// the anti-bot keeps quiet) without getting in the user's way.
 const OFFSCREEN_ARGS = ["--window-position=-32000,-32000"];
 
 /**
- * Запускает persistent-context на общем профиле.
- * Сначала пробует системный Chrome (channel: "chrome") — у него «настоящий»
- * TLS/JA3-фингерпринт, который проходит Aliyun WAF и не блокируется Google OAuth;
- * при его отсутствии — встроенный Chromium.
+ * Launches a persistent context on the shared profile. The system Chrome comes
+ * first — its TLS/JA3 fingerprint passes the Aliyun WAF and Google OAuth —
+ * with the bundled Chromium as fallback.
  */
 export async function launchQwenContext(options: {
   headless: boolean;
   /**
-   * "block" — запретить service workers. У chat.qwen.ai есть SW, который в
-   * фоновом мосте перехватывает API-fetch и подвешивает его; для моста блокируем.
+   * "block" forbids service workers. chat.qwen.ai registers one that intercepts
+   * and hangs the API fetch inside the background bridge.
    */
   serviceWorkers?: "allow" | "block";
-  /** Увести окно за экран (для фонового моста; логин оставляем видимым). */
+  /** Move the window off-screen (bridge only; sign-in stays visible). */
   offscreen?: boolean;
-}): Promise<import("playwright").BrowserContext> {
-  const launchOptions = {
+}): Promise<BrowserContext> {
+  return launchPersistentProfile(BROWSER_DATA_DIR, {
     headless: options.headless,
     viewport: { width: 1280, height: 800 },
     args: options.offscreen ? [...LAUNCH_ARGS, ...OFFSCREEN_ARGS] : LAUNCH_ARGS,
     serviceWorkers: options.serviceWorkers ?? "allow",
-  };
-
-  try {
-    return await chromium.launchPersistentContext(BROWSER_DATA_DIR, {
-      ...launchOptions,
-      channel: "chrome",
-    });
-  } catch {
-    return await chromium.launchPersistentContext(
-      BROWSER_DATA_DIR,
-      launchOptions,
-    );
-  }
+  });
 }

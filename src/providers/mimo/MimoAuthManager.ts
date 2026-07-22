@@ -16,28 +16,26 @@ const PS_INSTALL =
   'powershell -ep Bypass -c "irm https://mimo.xiaomi.com/install.ps1 | iex"';
 
 /**
- * Входа здесь нет: используется только бесплатный анонимный канал MiMo Auto,
- * а ключей и токенов расширение не хранит вовсе. «Авторизация» сводится к
- * одному вопросу — установлен ли CLI и отдаёт ли он модель.
+ * There is no sign-in: only the free anonymous MiMo Auto channel is used and no
+ * key or token is stored at all. "Authentication" boils down to one question —
+ * is the CLI installed and does it offer the model.
  */
 export class MimoAuthManager {
   /**
-   * Последний залогированный состав моделей. Проверку авторизации VS Code
-   * спрашивает из нескольких мест сразу (провайдер чата, доступность команд,
-   * статус), и без этого один и тот же список писался в лог по 4 раза подряд.
+   * Last logged model list. VS Code asks about auth from several places at once
+   * (chat provider, command availability, status), which logged the same line
+   * four times in a row.
    */
   private lastLoggedIds?: string;
 
-  /** Наши ID моделей, реально доступные текущей установке CLI. */
+  /** Our model ids actually available to the current CLI installation. */
   async availableModelIds(force = false): Promise<string[]> {
-    const routes = await listCliModelRoutes(force);
     const ids: string[] = [];
-    for (const route of routes) {
+    for (const route of await listCliModelRoutes(force)) {
       const id = findModelIdByRoute(route);
-      if (id && !ids.includes(id)) {
-        ids.push(id);
-      }
+      if (id && !ids.includes(id)) ids.push(id);
     }
+
     const joined = ids.join(", ") || "(none)";
     if (joined !== this.lastLoggedIds) {
       this.lastLoggedIds = joined;
@@ -50,11 +48,10 @@ export class MimoAuthManager {
     return (await this.availableModelIds()).length > 0;
   }
 
-  /** Не вход, а установка CLI: бесплатный канал работает сразу после неё. */
+  /** Not a sign-in but an install: the free channel works right after it. */
   async login(): Promise<void> {
     invalidateMimoCliCache();
     const bin = await resolveMimoBinary();
-
     if (!bin) {
       await this.offerInstall();
       return;
@@ -69,7 +66,7 @@ export class MimoAuthManager {
       return;
     }
 
-    // CLI есть, но модели не отдаёт — обычно не пройден мастер первого запуска.
+    // CLI present but offering nothing — usually its first-run wizard is unfinished.
     alog.warn("CLI found but MiMo Auto is not available");
     runInTerminal("MiMo Code — Setup", `"${bin}"`);
     vscode.window.showInformationMessage(
@@ -77,7 +74,7 @@ export class MimoAuthManager {
     );
   }
 
-  /** Выходить не из чего — просто забываем закэшированное состояние CLI. */
+  /** Nothing to sign out of; just forget the cached CLI state. */
   async logout(): Promise<void> {
     invalidateMimoCliCache();
     alog.info("logout: nothing to revoke (anonymous free channel)");
@@ -87,33 +84,31 @@ export class MimoAuthManager {
   }
 
   private async offerInstall(): Promise<void> {
-    const isWindows = process.platform === "win32";
-    const picks = [
-      {
-        label: "Install via npm",
-        detail: NPM_INSTALL,
-        command: NPM_INSTALL,
-      },
-      {
-        label: "Install via official script",
-        detail: isWindows ? PS_INSTALL : SCRIPT_INSTALL,
-        command: isWindows ? PS_INSTALL : SCRIPT_INSTALL,
-      },
-      {
-        label: "Already installed — set the path",
-        detail: "Opens the freeAI.mimo.path setting",
-        command: "",
-      },
-    ];
+    const scriptInstall =
+      process.platform === "win32" ? PS_INSTALL : SCRIPT_INSTALL;
 
-    const selected = await vscode.window.showQuickPick(picks, {
-      title: "MiMo Code CLI is not installed",
-      placeHolder: "The provider runs through the mimo CLI (no API key, no sign-in)",
-      ignoreFocusOut: true,
-    });
-    if (!selected) {
-      return;
-    }
+    const selected = await vscode.window.showQuickPick(
+      [
+        { label: "Install via npm", detail: NPM_INSTALL, command: NPM_INSTALL },
+        {
+          label: "Install via official script",
+          detail: scriptInstall,
+          command: scriptInstall,
+        },
+        {
+          label: "Already installed — set the path",
+          detail: "Opens the freeAI.mimo.path setting",
+          command: "",
+        },
+      ],
+      {
+        title: "MiMo Code CLI is not installed",
+        placeHolder:
+          "The provider runs through the mimo CLI (no API key, no sign-in)",
+        ignoreFocusOut: true,
+      },
+    );
+    if (!selected) return;
 
     if (!selected.command) {
       await vscode.commands.executeCommand(
@@ -124,8 +119,7 @@ export class MimoAuthManager {
     }
 
     alog.info(`install: ${selected.command}`);
-    // Установка и мастер первого запуска — двумя командами: `mimo` доводит
-    // настройку бесплатного канала до конца.
+    // Install, then `mimo` itself — its wizard finishes the free channel setup.
     runInTerminal("MiMo Code — Install", selected.command, "mimo");
     vscode.window.showInformationMessage(
       "Installing MiMo Code CLI in the terminal. When it finishes, run “AI Free VSCode — Status”.",

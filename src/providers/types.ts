@@ -1,48 +1,38 @@
 import * as vscode from "vscode";
 import { log } from "../logger";
 
-// ─── Model Info ────────────────────────────────────────────────────────────────
+// ─── Models ─────────────────────────────────────────────────────────────────
 
 export interface AIModelCapabilities {
-  /** Поддержка вызова инструментов (function calling) */
   toolCalling?: boolean;
-  /** Поддержка изображений как входных данных */
   imageInput?: boolean;
-  /** Поддержка thinking-режима */
   thinking?: boolean;
-  /** Годится для inline-подсказок. `false` убирает её из выбора. */
+  streaming?: boolean;
+  /** Fit for inline suggestions; `false` hides it from that picker. */
   suggestions?: boolean;
-  /** Годится для генерации коммит-сообщений. `false` убирает её из выбора. */
+  /** Fit for commit messages; `false` hides it from that picker. */
   commit?: boolean;
-  /** Годится для «Fix with AI». `false` убирает её из выбора. */
+  /** Fit for "Fix with AI Free"; `false` hides it from that picker. */
   fix?: boolean;
   /**
-   * Годится для чата. `false` убирает модель из списка VS Code целиком —
-   * а значит и из остальных фич, они берут модели оттуда же.
+   * Fit for chat. `false` drops the model from the VS Code list entirely — and
+   * therefore from the other features, which read that same list.
    */
   chat?: boolean;
-  /** Поддержка потокового режима */
-  streaming?: boolean;
 }
 
 export interface AIModelInfo {
-  /** Уникальный идентификатор модели у данного провайдера */
   id: string;
-  /** Отображаемое имя */
   name: string;
-  /** Семейство модели (для группировки в пикере) */
+  /** Model family, used for grouping in the picker. */
   family: string;
-  /** Версия модели */
   version?: string;
-  /** Максимальный контекст (токены входа) */
   maxInputTokens: number;
-  /** Максимальное количество токенов ответа */
   maxOutputTokens: number;
-  /** Возможности модели */
   capabilities: AIModelCapabilities;
 }
 
-// ─── Request / Response ────────────────────────────────────────────────────────
+// ─── Request / response ─────────────────────────────────────────────────────
 
 export interface AIMessage {
   role: "user" | "assistant" | "system";
@@ -60,61 +50,37 @@ export interface AIToolDefinition {
 }
 
 export interface AIRequestParams {
-  /** ID модели провайдера */
   model: string;
-  /** Массив сообщений */
   messages: AIMessage[];
-  /** ID чата для сохранения контекста (опционально) */
+  /** Upstream chat/session id, to keep context across turns. */
   chatId?: string;
-  /** ID родительского сообщения для цепочки контекста */
+  /** Parent message id, for backends that chain messages. */
   parentId?: string;
-  /** Список доступных инструментов */
   tools?: AIToolDefinition[];
-  /** Режим вызова tools */
   toolMode?: "auto" | "required" | "none";
   /**
-   * Принудительный режим thinking. Переопределяет настройку провайдера.
-   * Используется для служебных запросов (коммиты, inline-подсказки), где
-   * reasoning не нужен и только добавляет задержку.
+   * Forced thinking mode, overriding the provider default. Service requests
+   * (commits, inline suggestions) turn it off — reasoning only adds latency.
    */
   thinkingMode?: "auto" | "on" | "off";
-  /** AbortSignal для отмены запроса */
   abortSignal?: AbortSignal;
 }
 
-// ─── Stream Chunks ─────────────────────────────────────────────────────────────
-
-export interface AITextChunk {
-  type: "text";
-  content: string;
-}
-
-export interface AIThinkingChunk {
-  type: "thinking";
-  content: string;
-}
-
-export interface AIToolCallChunk {
-  type: "tool_call";
-  callId: string;
-  name: string;
-  /** JSON-строка аргументов (может приходить по частям) */
-  argumentsPart: string;
-}
-
-export interface AIUsageChunk {
-  type: "usage";
-  promptTokens: number;
-  completionTokens: number;
-}
+// ─── Stream chunks ──────────────────────────────────────────────────────────
 
 export type AIStreamChunk =
-  | AITextChunk
-  | AIThinkingChunk
-  | AIToolCallChunk
-  | AIUsageChunk;
+  | { type: "text"; content: string }
+  | { type: "thinking"; content: string }
+  | {
+      type: "tool_call";
+      callId: string;
+      name: string;
+      /** JSON arguments; may arrive in pieces. */
+      argumentsPart: string;
+    }
+  | { type: "usage"; promptTokens: number; completionTokens: number };
 
-// ─── Errors ────────────────────────────────────────────────────────────────────
+// ─── Errors ─────────────────────────────────────────────────────────────────
 
 export class AuthExpiredError extends Error {
   constructor(public readonly providerId: string) {
@@ -145,8 +111,9 @@ export class ProviderError extends Error {
 }
 
 /**
- * Aliyun WAF завернул прямой серверный запрос: вернулся HTML-челлендж
- * (обычно со статусом 200) вместо SSE-потока. Сигнал перейти на браузерный путь.
+ * Aliyun WAF turned the direct server request away, answering with an HTML
+ * challenge (usually at status 200) instead of an SSE stream. Signals that the
+ * browser path should be used.
  */
 export class WafChallengeError extends Error {
   constructor(
@@ -158,47 +125,33 @@ export class WafChallengeError extends Error {
   }
 }
 
-// ─── VS Code message conversion helpers ───────────────────────────────────────
+// ─── VS Code message conversion ─────────────────────────────────────────────
 
-/**
- * Конвертирует vscode.LanguageModelChatMessage в AIMessage.
- * Используется в VSCodeLMAdapter.
- */
+/** Converts a VS Code chat message into our provider-neutral shape. */
 export function vsCodeMessageToAI(
   msg: vscode.LanguageModelChatRequestMessage,
 ): AIMessage {
-  let role: AIMessage["role"];
-  switch (msg.role) {
-    case vscode.LanguageModelChatMessageRole.User:
-      role = "user";
-      break;
-    case vscode.LanguageModelChatMessageRole.Assistant:
-      role = "assistant";
-      break;
-    default:
-      // В API VS Code provider role официально user/assistant.
-      // Нестандартные роли не отправляем как system, чтобы не раздувать prompt.
-      role = "assistant";
-      break;
-  }
+  // The provider API only defines user/assistant. Anything else is kept as
+  // assistant rather than promoted to system, to avoid bloating the prompt.
+  const role: AIMessage["role"] =
+    msg.role === vscode.LanguageModelChatMessageRole.User
+      ? "user"
+      : "assistant";
 
-  // Собираем части сообщения, сохраняя изображения как отдельные image_url-part.
-  const contentParts: AIMessageContentPart[] = [];
+  const parts: AIMessageContentPart[] = [];
   const imageSources: string[] = [];
 
   const appendText = (text: string) => {
     if (!text) return;
-    const last = contentParts[contentParts.length - 1];
-    if (last && last.type === "text") {
-      last.text += text;
-      return;
-    }
-    contentParts.push({ type: "text", text });
+    const last = parts[parts.length - 1];
+    if (last?.type === "text") last.text += text;
+    else parts.push({ type: "text", text });
   };
 
-  const appendImageUrl = (url: string) => {
+  const appendImage = (url: string) => {
     if (!url) return;
-    contentParts.push({ type: "image_url", imageUrl: { url } });
+    parts.push({ type: "image_url", imageUrl: { url } });
+    imageSources.push(describeImageSource(url));
   };
 
   for (const part of msg.content) {
@@ -208,137 +161,71 @@ export function vsCodeMessageToAI(
     }
 
     if (part instanceof vscode.LanguageModelDataPart) {
-      const imageDataUrl = toImageDataUrl(part);
-      if (imageDataUrl) {
-        appendImageUrl(imageDataUrl);
-        imageSources.push(`data:${part.mimeType}`);
-        continue;
-      }
-
-      // Не-изображения сериализуем в текст, чтобы не терять контекст.
-      const raw = Buffer.from(part.data).toString("utf-8");
-      appendText(raw);
-      continue;
-    }
-
-    const imageUrl = extractImageUrlFromUnknown(part);
-    if (imageUrl) {
-      appendImageUrl(imageUrl);
-      imageSources.push(describeImageUrlSource(imageUrl));
+      const dataUrl = toImageDataUrl(part);
+      // Non-images are serialized to text so the context is not lost.
+      if (dataUrl) appendImage(dataUrl);
+      else appendText(Buffer.from(part.data).toString("utf-8"));
       continue;
     }
 
     if (part instanceof vscode.LanguageModelToolCallPart) {
-      const args = part.input ?? {};
       appendText(
         "```tool_call\n" +
-          JSON.stringify({ name: part.name, arguments: args }, null, 2) +
+          JSON.stringify(
+            { name: part.name, arguments: part.input ?? {} },
+            null,
+            2,
+          ) +
           "\n```",
       );
       continue;
     }
 
     if (part instanceof vscode.LanguageModelToolResultPart) {
-      const resultText = concatToolResultContent(part.content ?? []);
-      appendText(`[Tool result id=${part.callId}]\n${resultText}`);
+      appendText(
+        `[Tool result id=${part.callId}]\n${concatToolResultContent(part.content ?? [])}`,
+      );
       continue;
     }
 
-    // LanguageModelTextPart
-    if (
-      typeof part === "object" &&
-      part !== null &&
-      "value" in (part as Record<string, unknown>) &&
-      "value" in (part as { value?: unknown })
-    ) {
-      const value = (part as { value?: unknown }).value;
-      if (typeof value === "string") {
-        appendText(value);
-      } else if (value !== undefined) {
-        const nestedImageUrl = extractImageUrlFromUnknown(value);
-        if (nestedImageUrl) {
-          appendImageUrl(nestedImageUrl);
-          imageSources.push(describeImageUrlSource(nestedImageUrl));
-          continue;
-        }
-        try {
-          appendText(JSON.stringify(value));
-        } catch {
-          appendText(String(value));
-        }
-      }
+    const imageUrl = extractImageUrl(part);
+    if (imageUrl) {
+      appendImage(imageUrl);
       continue;
     }
 
-    // Fallback: не теряем нестандартные части (например tool result/meta)
-    if (typeof part === "object" && part !== null) {
-      try {
-        appendText(JSON.stringify(part));
-      } catch {
-        appendText(String(part));
-      }
+    // LanguageModelTextPart and anything else structured.
+    const value =
+      part && typeof part === "object" && "value" in part
+        ? (part as { value?: unknown }).value
+        : part;
+    if (typeof value === "string") {
+      appendText(value);
+    } else if (value !== undefined && value !== null) {
+      const nested = extractImageUrl(value);
+      if (nested) appendImage(nested);
+      else appendText(stringify(value));
     }
   }
 
-  const hasImages = contentParts.some((p) => p.type === "image_url");
-  if (!hasImages) {
-    const text = contentParts
-      .filter((p): p is { type: "text"; text: string } => p.type === "text")
-      .map((p) => p.text)
-      .join("");
-    return { role, content: text };
+  if (imageSources.length === 0) {
+    return {
+      role,
+      content: parts.map((p) => (p.type === "text" ? p.text : "")).join(""),
+    };
   }
 
-  const preview = imageSources.slice(0, 4).join(", ");
   log(
-    `[types] image parts parsed role=${role} count=${imageSources.length} sources=${preview}`,
+    `[types] image parts parsed role=${role} count=${imageSources.length} sources=${imageSources.slice(0, 4).join(", ")}`,
   );
-
-  return { role, content: contentParts };
+  return { role, content: parts };
 }
 
-function describeImageUrlSource(url: string): string {
+function describeImageSource(url: string): string {
   const raw = url.trim().toLowerCase();
-  if (raw.startsWith("data:")) {
-    const mime = raw.slice(5).split(";")[0] ?? "unknown";
-    return `data:${mime}`;
-  }
-  if (raw.startsWith("https://")) return "https";
-  if (raw.startsWith("http://")) return "http";
-  if (raw.startsWith("file:")) return "file";
-  if (raw.startsWith("blob:")) return "blob";
-  return "other";
-}
-
-function extractImageUrlFromUnknown(value: unknown): string | undefined {
-  if (!value || typeof value !== "object") {
-    return undefined;
-  }
-
-  const obj = value as Record<string, unknown>;
-
-  const directUrl = obj.url;
-  if (typeof directUrl === "string" && looksLikeImageUrl(directUrl)) {
-    return directUrl;
-  }
-
-  const imageUrlObj = obj.imageUrl;
-  if (imageUrlObj && typeof imageUrlObj === "object") {
-    const nestedUrl = (imageUrlObj as { url?: unknown }).url;
-    if (typeof nestedUrl === "string" && looksLikeImageUrl(nestedUrl)) {
-      return nestedUrl;
-    }
-  }
-
-  const valueObj = obj.value;
-  if (valueObj && typeof valueObj === "object") {
-    const nestedUrl = extractImageUrlFromUnknown(valueObj);
-    if (nestedUrl) {
-      return nestedUrl;
-    }
-  }
-
-  return undefined;
+  if (raw.startsWith("data:")) return `data:${raw.slice(5).split(";")[0]}`;
+  const scheme = /^(https?|file|blob):/.exec(raw)?.[1];
+  return scheme ?? "other";
 }
 
 function toImageDataUrl(
@@ -347,68 +234,60 @@ function toImageDataUrl(
   const mime = String(part.mimeType ?? "")
     .trim()
     .toLowerCase();
-  if (!mime.startsWith("image/")) {
-    return undefined;
-  }
-  const b64 = Buffer.from(part.data).toString("base64");
-  if (!b64) {
-    return undefined;
-  }
-  return `data:${mime};base64,${b64}`;
+  if (!mime.startsWith("image/")) return undefined;
+  const base64 = Buffer.from(part.data).toString("base64");
+  return base64 ? `data:${mime};base64,${base64}` : undefined;
+}
+
+/** Finds an image URL in an unknown part shape (`url`, `imageUrl.url`, `value`). */
+function extractImageUrl(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const obj = value as Record<string, unknown>;
+
+  const direct = obj.url;
+  if (typeof direct === "string" && looksLikeImageUrl(direct)) return direct;
+
+  const nested = (obj.imageUrl as { url?: unknown } | undefined)?.url;
+  if (typeof nested === "string" && looksLikeImageUrl(nested)) return nested;
+
+  return obj.value ? extractImageUrl(obj.value) : undefined;
 }
 
 function looksLikeImageUrl(url: string): boolean {
   const raw = url.trim();
-  if (!raw) return false;
-
-  if (/^(https?:|file:|data:|blob:)/i.test(raw)) {
-    return true;
-  }
-
-  if (/\.(png|jpe?g|gif|webp|bmp|svg)(\?.*)?$/i.test(raw)) {
-    return true;
-  }
-
-  return false;
+  return (
+    /^(https?:|file:|data:|blob:)/i.test(raw) ||
+    /\.(png|jpe?g|gif|webp|bmp|svg)(\?.*)?$/i.test(raw)
+  );
 }
 
 function concatToolResultContent(parts: readonly unknown[]): string {
   let text = "";
+
   for (const part of parts) {
     if (part instanceof vscode.LanguageModelTextPart) {
       text += part.value;
-      continue;
-    }
-    if (part instanceof vscode.LanguageModelDataPart) {
-      const b64 = Buffer.from(part.data).toString("base64");
-      text += `[data:${part.mimeType};base64,${b64}]`;
-      continue;
-    }
-    if (typeof part === "string") {
+    } else if (part instanceof vscode.LanguageModelDataPart) {
+      text += `[data:${part.mimeType};base64,${Buffer.from(part.data).toString("base64")}]`;
+    } else if (typeof part === "string") {
       text += part;
-      continue;
-    }
-    if (part && typeof part === "object" && "value" in part) {
+    } else if (part && typeof part === "object" && "value" in part) {
       const value = (part as { value?: unknown }).value;
-      if (typeof value === "string") {
-        text += value;
-      } else if (value !== undefined) {
-        try {
-          text += JSON.stringify(value);
-        } catch {
-          text += String(value);
-        }
+      if (value !== undefined) {
+        text += typeof value === "string" ? value : stringify(value);
       }
-      continue;
-    }
-    if (part !== null && part !== undefined) {
-      try {
-        text += JSON.stringify(part);
-      } catch {
-        text += String(part);
-      }
+    } else if (part !== null && part !== undefined) {
+      text += stringify(part);
     }
   }
-  const normalized = text.trim();
-  return normalized.length > 0 ? normalized : "{}";
+
+  return text.trim() || "{}";
+}
+
+function stringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
 }

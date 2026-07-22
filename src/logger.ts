@@ -1,18 +1,23 @@
 import * as vscode from "vscode";
 
-let _channel: vscode.OutputChannel | undefined;
+type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
 
-export function setOutputChannel(channel: vscode.OutputChannel): void {
-  _channel = channel;
+let channel: vscode.OutputChannel | undefined;
+
+export function setOutputChannel(output: vscode.OutputChannel): void {
+  channel = output;
 }
 
-export type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
-
 /**
- * DEBUG-логи печатаются только при включённой настройке `freeAI.debug`.
- * Остальные уровни печатаются всегда. Конфиг читаем лениво и не кэшируем —
- * вызовов немного, зато тумблер срабатывает без перезапуска.
+ * DEBUG is printed only with `freeAI.debug` on; other levels always are. The
+ * setting is read lazily and never cached, so the toggle works without reload.
  */
+function write(level: LogLevel, message: string): void {
+  if (level === "DEBUG" && !isDebugEnabled()) return;
+  const ts = new Date().toISOString().slice(11, 23); // HH:MM:SS.mmm
+  channel?.appendLine(`[${ts}] [${level}] ${message}`);
+}
+
 function isDebugEnabled(): boolean {
   try {
     return vscode.workspace
@@ -23,29 +28,9 @@ function isDebugEnabled(): boolean {
   }
 }
 
-function write(level: LogLevel, message: string): void {
-  if (level === "DEBUG" && !isDebugEnabled()) {
-    return;
-  }
-  const ts = new Date().toISOString().slice(11, 23); // HH:MM:SS.mmm
-  _channel?.appendLine(`[${ts}] [${level}] ${message}`);
-}
-
-/** INFO-лог (печатается всегда). Обратно совместим со старым `log(...)`. */
+/** INFO log with a caller-supplied prefix. */
 export function log(message: string): void {
   write("INFO", message);
-}
-
-export function logDebug(message: string): void {
-  write("DEBUG", message);
-}
-
-export function logWarn(message: string): void {
-  write("WARN", message);
-}
-
-export function logError(message: string): void {
-  write("ERROR", message);
 }
 
 export interface ScopedLogger {
@@ -56,24 +41,37 @@ export interface ScopedLogger {
 }
 
 /**
- * Логгер с единым префиксом `[scope]` — общий формат для всех провайдеров.
- * Пример: `createLogger("qwen-auth").info("login success")`
- * → `[12:34:56.789] [INFO] [qwen-auth] login success`.
+ * Logger with a fixed `[scope]` prefix:
+ * `createLogger("qwen-auth").info("ok")` → `[12:34:56.789] [INFO] [qwen-auth] ok`
  */
 export function createLogger(scope: string): ScopedLogger {
   const prefix = `[${scope}]`;
   return {
-    debug: (m: string) => write("DEBUG", `${prefix} ${m}`),
-    info: (m: string) => write("INFO", `${prefix} ${m}`),
-    warn: (m: string) => write("WARN", `${prefix} ${m}`),
-    error: (m: string) => write("ERROR", `${prefix} ${m}`),
+    debug: (m) => write("DEBUG", `${prefix} ${m}`),
+    info: (m) => write("INFO", `${prefix} ${m}`),
+    warn: (m) => write("WARN", `${prefix} ${m}`),
+    error: (m) => write("ERROR", `${prefix} ${m}`),
   };
 }
 
-/** Безопасно приводит ошибку к строке для лога. */
+/**
+ * Node's fetch reports a bare "fetch failed" and hides the real reason in
+ * `cause`, so the chain is unwrapped — otherwise the log says nothing at all.
+ */
 export function errToString(err: unknown): string {
-  if (err instanceof Error) {
-    return err.message || err.name;
+  if (!(err instanceof Error)) {
+    return typeof err === "string" ? err : String(err);
   }
-  return typeof err === "string" ? err : String(err);
+
+  const base = err.message || err.name;
+  const cause = (err as { cause?: unknown }).cause;
+  if (!cause) return base;
+
+  const detail =
+    cause instanceof Error
+      ? [(cause as NodeJS.ErrnoException).code, cause.message]
+          .filter(Boolean)
+          .join(": ")
+      : String(cause);
+  return detail ? `${base} (${detail})` : base;
 }

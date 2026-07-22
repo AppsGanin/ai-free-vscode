@@ -1,7 +1,7 @@
-import { createProviderModelIdResolver } from "../common/ModelIdResolver";
+import { aliasResolver } from "../common/models";
 import type { AIModelInfo } from "../types";
 
-// Kimi (Moonshot) веб-версия kimi.com — флагман K2.5.
+// Kimi (Moonshot) web app kimi.com — flagship K2.5 only.
 export const KIMI_MODELS: AIModelInfo[] = [
   {
     id: "kimi-k2.5",
@@ -20,21 +20,10 @@ export const KIMI_MODELS: AIModelInfo[] = [
   },
 ];
 
-/** Алиасы: короткое имя → канонический ID */
-export const KIMI_MODEL_ALIASES: Record<string, string> = {
+export const resolveKimiModelId = aliasResolver({
   kimi: "kimi-k2.5",
-  "kimi-k2.5": "kimi-k2.5",
   "kimi-k2": "kimi-k2.5",
   k2: "kimi-k2.5",
   "k2.5": "kimi-k2.5",
   default: "kimi-k2.5",
-};
-
-const KIMI_MODEL_ID_RESOLVER = createProviderModelIdResolver({
-  aliases: KIMI_MODEL_ALIASES,
 });
-
-/** Разрешает алиас в канонический ID модели */
-export function resolveKimiModelId(id: string): string {
-  return KIMI_MODEL_ID_RESOLVER.resolveModelId(id);
-}

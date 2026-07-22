@@ -1,5 +1,15 @@
-import { createProviderModelIdResolver } from "../common/ModelIdResolver";
+import { aliasResolver } from "../common/models";
 import type { AIModelInfo } from "../types";
+
+const CAPABILITIES = {
+  toolCalling: true,
+  streaming: true,
+  thinking: true,
+  chat: true,
+  commit: true,
+  suggestions: true,
+  fix: true,
+} as const;
 
 export const DEEPSEEK_MODELS: AIModelInfo[] = [
   {
@@ -9,15 +19,7 @@ export const DEEPSEEK_MODELS: AIModelInfo[] = [
     version: "1.0.0",
     maxInputTokens: 131072,
     maxOutputTokens: 8192,
-    capabilities: {
-      toolCalling: true,
-      streaming: true,
-      thinking: true,
-      chat: true,
-      commit: true,
-      suggestions: true,
-      fix: true,
-    },
+    capabilities: { ...CAPABILITIES },
   },
   {
     id: "deepseek-expert",
@@ -26,43 +28,19 @@ export const DEEPSEEK_MODELS: AIModelInfo[] = [
     version: "1.0.0",
     maxInputTokens: 131072,
     maxOutputTokens: 8192,
-    capabilities: {
-      toolCalling: true,
-      streaming: true,
-      thinking: true,
-      chat: true,
-      commit: true,
-      suggestions: true,
-      fix: true,
-    },
+    capabilities: { ...CAPABILITIES },
   },
 ];
 
-/** Алиасы: короткое имя → канонический ID модели */
-export const DEEPSEEK_MODEL_ALIASES: Record<string, string> = {
+export const resolveDeepSeekModelId = aliasResolver({
   deepseek: "deepseek-default",
-  "deepseek-default": "deepseek-default",
   default: "deepseek-default",
   expert: "deepseek-expert",
-  "deepseek-expert": "deepseek-expert",
-};
-
-export const DEEPSEEK_API_MODEL_TYPE_BY_MODEL_ID: Record<string, string> = {
-  "deepseek-default": "default",
-  "deepseek-expert": "expert",
-};
-
-const DEEPSEEK_MODEL_ID_RESOLVER = createProviderModelIdResolver({
-  aliases: DEEPSEEK_MODEL_ALIASES,
-  apiModelTypeByModelId: DEEPSEEK_API_MODEL_TYPE_BY_MODEL_ID,
 });
 
-/** Разрешает алиас в канонический ID модели */
-export function resolveDeepSeekModelId(id: string): string {
-  return DEEPSEEK_MODEL_ID_RESOLVER.resolveModelId(id);
-}
-
-/** Преобразует канонический ID к model_type, ожидаемому API DeepSeek */
+/** Canonical id → `model_type` expected by the DeepSeek API. */
 export function toDeepSeekApiModelType(id: string): string {
-  return DEEPSEEK_MODEL_ID_RESOLVER.toApiModelType(id);
+  return resolveDeepSeekModelId(id) === "deepseek-expert"
+    ? "expert"
+    : "default";
 }
