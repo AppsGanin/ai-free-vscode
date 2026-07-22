@@ -28,13 +28,59 @@ const TRANSCRIPT_CUT_PATTERN =
 // (len("[Tool result id=") - 1).
 const TRANSCRIPT_CUT_HOLDBACK_CHARS = 15;
 
+/**
+ * Закрывающие теги протокола без пары. Модель роняет их в поток отдельно от
+ * вызова (или после уже разобранного), а открывающего маркера рядом нет —
+ * значит, hold-буфер их не удержит и они утекут в чат как обычный текст.
+ */
+const STRAY_CLOSE_TAG_RE =
+  /<\/(?:tool_call|function|parameter|tool_name|tool_arguments)>[ \t]*\n?/gi;
+const STRAY_CLOSE_TAGS = [
+  "</tool_call>",
+  "</function>",
+  "</parameter>",
+  "</tool_name>",
+  "</tool_arguments>",
+];
+
+function stripStrayCloseTags(text: string): string {
+  if (!text || !text.includes("</")) return text;
+  return text.replace(STRAY_CLOSE_TAG_RE, "");
+}
+
+/**
+ * Длина хвоста, который выглядит началом закрывающего тега (`<`, `</`, `</too`…).
+ * Такой хвост нельзя отдавать сразу: тег разорван границей чанка, и в чате его
+ * половинки склеятся обратно в видимый `</tool_call>`.
+ */
+function trailingCloseTagPrefixLen(text: string): number {
+  let longest = 0;
+  for (const tag of STRAY_CLOSE_TAGS) {
+    for (let len = Math.min(tag.length - 1, text.length); len > 0; len--) {
+      if (text.endsWith(tag.slice(0, len))) {
+        longest = Math.max(longest, len);
+        break;
+      }
+    }
+  }
+  return longest;
+}
+
 export function stripDanglingToolCallMarkers(text: string): string {
-  return text
-    .replace(/```tool_call\s*```?/gi, "")
-    .replace(/```tool_call\s*$/gim, "")
-    .replace(/^\s*```tool_call\s*\n?/gim, "")
-    .replace(/^\s*<tool_call>\s*$/gim, "")
-    .trim();
+  return (
+    text
+      .replace(/```tool_call\s*```?/gi, "")
+      .replace(/```tool_call\s*$/gim, "")
+      .replace(/^\s*```tool_call\s*\n?/gim, "")
+      .replace(/^\s*<tool_call>\s*$/gim, "")
+      // Осиротевшие теги XML-протокола MiMo/Qwen-Coder: модель регулярно теряет
+      // открывающий или закрывающий тег, и без этого они видны в чате.
+      .replace(/<\/?tool_call>/gi, "")
+      .replace(/<function\s*=\s*[\w.:-]+\s*>|<\/function>/gi, "")
+      .replace(/<parameter\s*=\s*[\w.:-]+\s*>|<\/parameter>/gi, "")
+      .replace(/<\/?tool_name>|<\/?tool_arguments>/gi, "")
+      .trim()
+  );
 }
 
 function sanitizeProtocolTranscript(text: string): string {
@@ -43,6 +89,16 @@ function sanitizeProtocolTranscript(text: string): string {
   let sanitized = text;
   sanitized = sanitized.replace(/```tool_call[\s\S]*?```/gi, "\n\n");
   sanitized = sanitized.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "\n\n");
+  // Полный XML-вызов MiMo/Qwen-Coder (даже без обёртки <tool_call>).
+  sanitized = sanitized.replace(
+    /<function\s*=\s*[\w.:-]+\s*>[\s\S]*?<\/function>/gi,
+    "\n\n",
+  );
+  // Пара <tool_name>…</tool_name><tool_arguments>…</tool_arguments>.
+  sanitized = sanitized.replace(
+    /<tool_name>[\s\S]*?<\/tool_name>(\s*<tool_arguments>[\s\S]*?<\/tool_arguments>)?/gi,
+    "\n\n",
+  );
   sanitized = stripInlineToolCallJson(sanitized);
   sanitized = sanitized.replace(/^\s*Assistant:\s?/gim, "");
   sanitized = sanitized.replace(/```[a-zA-Z0-9_-]*\s*\n\s*```/g, "\n");
@@ -70,6 +126,7 @@ function sanitizeProtocolTranscript(text: string): string {
  */
 export class StreamingToolCallRouter {
   private pendingBuffer = "";
+  private closeTagTail = "";
   private holdBuffer = "";
   private holdActive = false;
   private cutActive = false;
@@ -140,13 +197,42 @@ export class StreamingToolCallRouter {
     yield* this.routeSafe(safe);
   }
 
+  /**
+   * Единая точка выдачи текста: срезает осиротевшие закрывающие теги протокола.
+   * Открывающего маркера у них нет, поэтому hold-буфер их не ловит, и без этой
+   * очистки `</tool_call>` уходит прямо в чат.
+   */
+  private *emitText(text: string): Iterable<AIStreamChunk> {
+    let content = stripStrayCloseTags(this.closeTagTail + text);
+    this.closeTagTail = "";
+
+    const partial = trailingCloseTagPrefixLen(content);
+    if (partial > 0) {
+      this.closeTagTail = content.slice(content.length - partial);
+      content = content.slice(0, content.length - partial);
+    }
+
+    if (content) {
+      yield { type: "text", content };
+    }
+  }
+
+  /** Отдаёт недособранный хвост тега в конце ответа (полным тегом он уже не станет). */
+  private *flushCloseTagTail(): Iterable<AIStreamChunk> {
+    const tail = this.closeTagTail;
+    this.closeTagTail = "";
+    if (tail) {
+      yield { type: "text", content: tail };
+    }
+  }
+
   private *routeSafe(rawText: string): Iterable<AIStreamChunk> {
     if (!rawText) {
       return;
     }
 
     if (!this.allowToolCalls) {
-      yield { type: "text", content: rawText };
+      yield* this.emitText(rawText);
       return;
     }
 
@@ -158,10 +244,7 @@ export class StreamingToolCallRouter {
       const overHardCap =
         this.holdBuffer.length >= MAX_TOOLCALL_HARD_CAP_CHARS;
       if ((overSoftLimit && !realToolCall) || overHardCap) {
-        const sanitized = stripDanglingToolCallMarkers(this.holdBuffer);
-        if (sanitized) {
-          yield { type: "text", content: sanitized };
-        }
+        yield* this.emitText(stripDanglingToolCallMarkers(this.holdBuffer));
         this.holdBuffer = "";
         this.holdActive = false;
       }
@@ -172,21 +255,17 @@ export class StreamingToolCallRouter {
     const markerIdx = findToolCallMarkerStart(this.pendingBuffer);
 
     if (markerIdx !== -1) {
-      const safeText = this.pendingBuffer.slice(0, markerIdx);
-      if (safeText) {
-        yield { type: "text", content: safeText };
-      }
+      yield* this.emitText(this.pendingBuffer.slice(0, markerIdx));
       this.holdBuffer = this.pendingBuffer.slice(markerIdx);
       this.pendingBuffer = "";
       this.holdActive = true;
     } else if (this.pendingBuffer.length > TOOL_MARKER_HOLDBACK_CHARS) {
-      const safeText = this.pendingBuffer.slice(
-        0,
-        this.pendingBuffer.length - TOOL_MARKER_HOLDBACK_CHARS,
+      yield* this.emitText(
+        this.pendingBuffer.slice(
+          0,
+          this.pendingBuffer.length - TOOL_MARKER_HOLDBACK_CHARS,
+        ),
       );
-      if (safeText) {
-        yield { type: "text", content: safeText };
-      }
       this.pendingBuffer = this.pendingBuffer.slice(
         this.pendingBuffer.length - TOOL_MARKER_HOLDBACK_CHARS,
       );
@@ -211,8 +290,9 @@ export class StreamingToolCallRouter {
 
     if (!this.allowToolCalls) {
       if (this.pendingBuffer) {
-        yield { type: "text", content: this.pendingBuffer };
+        const tail = this.pendingBuffer;
         this.pendingBuffer = "";
+        yield* this.emitText(tail);
       }
       return;
     }
@@ -240,19 +320,17 @@ export class StreamingToolCallRouter {
           yield chunk;
         }
         if (sanitizedRemainder.trim()) {
-          yield { type: "text", content: sanitizedRemainder };
+          yield* this.emitText(sanitizedRemainder);
         }
       } else {
-        const textOut = sanitizedRemainder || holdBuffer.trim();
-        if (textOut) {
-          yield { type: "text", content: textOut };
-        }
+        yield* this.emitText(sanitizedRemainder || holdBuffer.trim());
       }
     }
 
     if (tailText) {
-      yield { type: "text", content: tailText };
+      yield* this.emitText(tailText);
     }
+    yield* this.flushCloseTagTail();
   }
 
   /**
@@ -273,12 +351,11 @@ export class StreamingToolCallRouter {
       const sanitized = sanitizeProtocolTranscript(
         stripDanglingToolCallMarkers(holdBuffer),
       );
-      if (sanitized) {
-        yield { type: "text", content: sanitized };
-      }
+      yield* this.emitText(sanitized);
     }
     if (tailText) {
-      yield { type: "text", content: tailText };
+      yield* this.emitText(tailText);
     }
+    yield* this.flushCloseTagTail();
   }
 }

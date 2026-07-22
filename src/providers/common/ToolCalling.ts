@@ -5,8 +5,7 @@ import type {
 } from "../types";
 
 export type ToolPromptMessageContent =
-  | string
-  | Array<{ type?: string; text?: string }>;
+  string | Array<{ type?: string; text?: string }>;
 
 export interface ToolCallParseOptions {
   logger?: (message: string) => void;
@@ -19,6 +18,10 @@ export const DEFAULT_TOOL_CALL_MARKERS = [
   "`tool_call {",
   "tool_call {",
   "\ntool_call {",
+  // Нативный XML-формат MiMo/Qwen-Coder: <function=name><parameter=key>...
+  "<function=",
+  // Второй вариант у MiMo: <tool_name>name</tool_name><tool_arguments>{...}
+  "<tool_name>",
 ];
 
 // Минимальная длина частичного префикса маркера при стриминге.
@@ -72,11 +75,13 @@ export function findToolCallMarkerStart(
 
 // Полное вхождение начала JSON tool-call объекта (с учётом пробелов): {"name":
 const JSON_TOOLCALL_START_RE = /\{\s*"name"\s*:/;
-// Компактная форма для распознавания частичного префикса в конце чанка.
-const JSON_TOOLCALL_PARTIAL = '{"name"';
-// Минимальная длина частичного префикса JSON tool call ({"nam...), чтобы не
-// реагировать на любой одиночный символ "{" в обычном тексте/коде.
-const MIN_PARTIAL_JSON_TOOLCALL_LEN = 5;
+// Частичный префикс в конце чанка: `{`, `{\n`, `{ "`, `{"na`, … Компактная форма
+// `{"name"` здесь не годится: у Qwen дельты приходят по 1–35 символов, и чанк
+// регулярно обрывается сразу после `{` или `{\n`. Тогда открывающая скобка
+// утекала в чат как текст, а следующий чанк с `"name":` было уже не с чем
+// склеить — вызов оставался видимым JSON'ом в ответе.
+// Ложное удержание обычного текста на `{` разгребает MAX_TOOLCALL_HOLD_BUFFER_CHARS.
+const JSON_TOOLCALL_PARTIAL_TAIL_RE = /\{\s*(?:"(?:n(?:a(?:m(?:e)?)?)?)?)?$/;
 
 /**
  * Возвращает индекс начала JSON tool-call объекта ({"name": ...) в тексте,
@@ -87,18 +92,9 @@ function findJsonToolCallStart(text: string): number {
   const full = JSON_TOOLCALL_START_RE.exec(text);
   let earliest = full ? full.index : -1;
 
-  for (
-    let len = Math.min(JSON_TOOLCALL_PARTIAL.length - 1, text.length);
-    len >= MIN_PARTIAL_JSON_TOOLCALL_LEN;
-    len--
-  ) {
-    if (text.endsWith(JSON_TOOLCALL_PARTIAL.slice(0, len))) {
-      const start = text.length - len;
-      if (earliest === -1 || start < earliest) {
-        earliest = start;
-      }
-      break;
-    }
+  const partial = JSON_TOOLCALL_PARTIAL_TAIL_RE.exec(text);
+  if (partial && (earliest === -1 || partial.index < earliest)) {
+    earliest = partial.index;
   }
 
   return earliest;
@@ -114,6 +110,8 @@ export function looksLikeToolCallStart(text: string): boolean {
   return (
     /```tool_call/i.test(text) ||
     /<tool_call>/i.test(text) ||
+    /<function\s*=/i.test(text) ||
+    /<tool_name>/i.test(text) ||
     /"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:/.test(text) ||
     /"arguments"\s*:\s*\{/.test(text)
   );
@@ -294,7 +292,7 @@ export function* parseToolCallsFromText(
     if (closeIdx === -1) {
       const rest = text.slice(openIdx).trimEnd();
       if (rest) {
-        yield { type: "text", content: rest };
+        bufferedText += (bufferedText ? "\n" : "") + rest;
       }
       break;
     }
@@ -326,6 +324,36 @@ export function* parseToolCallsFromText(
     );
     // При наличии tool_call не показываем промежуточный служебный текст
     // (план, pseudo calls, transcript), чтобы он не утекал пользователю в чат.
+    return;
+  }
+
+  // Нативный формат MiMo (и Qwen-Coder): <function=name><parameter=key>value.
+  // Идёт сразу после JSON-варианта, потому что модель мешает его с обычным
+  // текстом, и без разбора в чат утекают куски разметки (`</tool_call>`).
+  const xmlFunctionCalls = parseXmlFunctionToolCallsFromText(text);
+  if (xmlFunctionCalls.calls.length > 0) {
+    logger?.(
+      `${logPrefix}parsed ${xmlFunctionCalls.calls.length} tool_call(s) from xml function syntax`,
+    );
+
+    for (const call of xmlFunctionCalls.calls) {
+      yield call;
+    }
+
+    return;
+  }
+
+  // Второй нативный вариант MiMo: имя и аргументы отдельными тегами.
+  const tagPairCalls = parseTagPairToolCallsFromText(text);
+  if (tagPairCalls.calls.length > 0) {
+    logger?.(
+      `${logPrefix}parsed ${tagPairCalls.calls.length} tool_call(s) from tool_name/tool_arguments syntax`,
+    );
+
+    for (const call of tagPairCalls.calls) {
+      yield call;
+    }
+
     return;
   }
 
@@ -886,6 +914,106 @@ function extractBalancedJsonObjects(text: string): string[] {
   }
 
   return result;
+}
+
+// Нативная разметка вызова у MiMo/Qwen-Coder:
+//   <tool_call><function=read_file><parameter=path>/a/b.ts</parameter></function></tool_call>
+// Закрывающие теги модель нередко теряет, поэтому и `</function>`, и
+// `</parameter>` опциональны — блок тогда тянется до следующего тега/конца.
+const XML_FUNCTION_RE =
+  /<function\s*=\s*([\w.:-]+)\s*>([\s\S]*?)(?=<\/function>|<function\s*=|<\/tool_call>|$)/gi;
+const XML_PARAMETER_RE =
+  /<parameter\s*=\s*([\w.:-]+)\s*>([\s\S]*?)(?=<\/parameter>|<parameter\s*=|<\/function>|<\/tool_call>|$)/gi;
+
+/** Приводит текстовое значение параметра к JSON-типу (числа/булевы/объекты). */
+function coerceXmlParameterValue(raw: string): unknown {
+  // Ведущий перевод строки — часть разметки, а не значения; хвостовые пробелы
+  // модель добавляет перед закрывающим тегом.
+  const value = raw.replace(/^\r?\n/, "").replace(/\s+$/, "");
+  if (!value) return "";
+  if (/^(true|false)$/i.test(value)) return value.toLowerCase() === "true";
+  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
+  if (/^[[{]/.test(value)) {
+    try {
+      return JSON.parse(value) as unknown;
+    } catch {
+      // не JSON — оставляем строкой
+    }
+  }
+  return value;
+}
+
+function parseXmlFunctionToolCallsFromText(text: string): {
+  calls: AIStreamChunk[];
+} {
+  const calls: AIStreamChunk[] = [];
+
+  for (const match of text.matchAll(XML_FUNCTION_RE)) {
+    const name = match[1]?.trim();
+    if (!name) continue;
+
+    const args: Record<string, unknown> = {};
+    for (const param of (match[2] ?? "").matchAll(XML_PARAMETER_RE)) {
+      const key = param[1]?.trim();
+      if (!key) continue;
+      args[key] = coerceXmlParameterValue(param[2] ?? "");
+    }
+
+    calls.push(createToolCallChunk({ name, argumentsValue: args }));
+  }
+
+  return { calls };
+}
+
+// Второй нативный вариант MiMo: имя и аргументы отдельными тегами —
+//   <tool_name>list_dir</tool_name>
+//   <tool_arguments>{ "path": "/a/b" }</tool_arguments>
+// Блок аргументов необязателен (вызовы без параметров) и, как обычно у моделей,
+// может остаться незакрытым.
+const TAG_TOOL_NAME_RE =
+  /<tool_name>\s*([\w.:-]+)\s*(?:<\/tool_name>|$)([\s\S]*?)(?=<tool_name>|$)/gi;
+const TAG_TOOL_ARGS_RE =
+  /<tool_arguments>([\s\S]*?)(?:<\/tool_arguments>|<\/tool_call>|$)/i;
+
+function parseTagPairToolCallsFromText(text: string): {
+  calls: AIStreamChunk[];
+} {
+  const calls: AIStreamChunk[] = [];
+
+  for (const match of text.matchAll(TAG_TOOL_NAME_RE)) {
+    const name = match[1]?.trim();
+    if (!name) continue;
+
+    const argsBlock = TAG_TOOL_ARGS_RE.exec(match[2] ?? "");
+    const args = argsBlock ? parseToolArgumentsBlock(argsBlock[1] ?? "") : {};
+
+    calls.push(createToolCallChunk({ name, argumentsValue: args }));
+  }
+
+  return { calls };
+}
+
+/** Тело <tool_arguments>: обычно JSON, но встречаются и <parameter=…>-пары. */
+function parseToolArgumentsBlock(raw: string): Record<string, unknown> {
+  const body = raw.trim();
+  if (!body) return {};
+
+  const start = body.indexOf("{");
+  if (start !== -1) {
+    const balanced = extractBalancedJsonAt(body, start);
+    const parsed = balanced ? tryParseJson(balanced.json) : undefined;
+    if (parsed && typeof parsed === "object") {
+      return parsed as Record<string, unknown>;
+    }
+  }
+
+  const args: Record<string, unknown> = {};
+  for (const param of body.matchAll(XML_PARAMETER_RE)) {
+    const key = param[1]?.trim();
+    if (!key) continue;
+    args[key] = coerceXmlParameterValue(param[2] ?? "");
+  }
+  return args;
 }
 
 function tryParseJson(

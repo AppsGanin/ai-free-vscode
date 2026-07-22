@@ -8,7 +8,7 @@ const watch = process.argv.includes("--watch");
 //   PROVIDER_QWEN=false npm run bundle        — собрать без Qwen
 //   PROVIDER_KIMI=0 PROVIDER_QWEN=off npm ...   — без Kimi и Qwen
 // По умолчанию включены все.
-const ALL_PROVIDERS = ["qwen", "deepseek", "kimi"];
+const ALL_PROVIDERS = ["qwen", "deepseek", "kimi", "mimo"];
 
 function isProviderEnabled(name) {
   const raw = process.env[`PROVIDER_${name.toUpperCase()}`];

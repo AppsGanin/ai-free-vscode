@@ -114,6 +114,11 @@
           "default": "auto",
           "markdownDescription": "How the Qwen anti-bot (WAF) fallback browser runs. `auto` is recommended. Changing this needs a window reload."
         },
+        "freeAI.mimo.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the MiMo Code CLI executable (`mimo`). Leave empty to auto-detect in `~/.mimocode/bin` and `PATH`. The provider talks to a local `mimo serve` process, so no API key is needed — sign-in lives in the CLI."
+        },
         "freeAI.debug": {
           "type": "boolean",
           "default": false,

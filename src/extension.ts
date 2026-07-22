@@ -4,6 +4,7 @@ import { BaseAIProvider } from "./providers/BaseAIProvider";
 import { UnifiedProvider } from "./providers/UnifiedProvider";
 import { DeepSeekProvider } from "./providers/deepseek/DeepSeekProvider";
 import { KimiProvider } from "./providers/kimi/KimiProvider";
+import { MimoProvider } from "./providers/mimo/MimoProvider";
 import { ProviderKey, enabledProviders } from "./providers/providerConfig";
 import { QwenProvider } from "./providers/qwen/QwenProvider";
 import { AuthExpiredError, RateLimitError } from "./providers/types";
@@ -29,6 +30,7 @@ export function activate(context: vscode.ExtensionContext): void {
     qwen: () => new QwenProvider(),
     deepseek: () => new DeepSeekProvider(),
     kimi: () => new KimiProvider(),
+    mimo: () => new MimoProvider(),
   };
 
   const subProviders = enabledProviders().map((key) =>

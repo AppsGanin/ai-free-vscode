@@ -74,6 +74,13 @@ export class QwenProvider extends BaseAIProvider {
       );
     }
 
+    // Клиент может уйти в новый chat_id (занятый чат, обрыв, internal error).
+    // Без переезда кэша следующий ход снова постучится в мёртвый чат.
+    const rememberChatId = (newChatId: string) => {
+      this.chatIdByConversation.set(conversationKey, newChatId);
+      log(`[${this.id}] chat_id switched to ${newChatId}`);
+    };
+
     try {
       yield* this.apiClient.sendMessageStream(
         {
@@ -81,6 +88,7 @@ export class QwenProvider extends BaseAIProvider {
           chatId,
         },
         token,
+        rememberChatId,
       );
     } catch (err) {
       if (!(err instanceof AuthExpiredError)) {
@@ -96,6 +104,7 @@ export class QwenProvider extends BaseAIProvider {
           yield* this.apiClient.sendMessageStream(
             { ...params, chatId },
             refreshed,
+            rememberChatId,
           );
           return;
         } catch (retryErr) {

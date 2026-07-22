@@ -72,9 +72,20 @@ interface QwenContentPart {
 
 interface QwenStreamDelta {
   role?: string;
+  /** Имя инструмента в служебных дельтах role=function. */
+  name?: string;
   phase?: "think" | "answer" | string;
   content?: string;
   reasoning_content?: string;
+  /**
+   * Qwen отдаёт вызов инструмента в старом формате OpenAI (function_call),
+   * а не в tool_calls. Аргументы приходят накопительными снимками:
+   * "" → "{\"filePath\": " → … → полный JSON.
+   */
+  function_call?: {
+    name?: string;
+    arguments?: string;
+  };
   tool_calls?: Array<{
     index: number;
     id: string;
@@ -108,6 +119,28 @@ interface QwenStreamChunk {
   };
   error?: unknown;
   details?: unknown;
+}
+
+/**
+ * Разбирает накопительный снимок аргументов function_call. Возвращает объект
+ * только когда JSON стал синтаксически полным — незакрытая скобка означает,
+ * что вызов ещё стримится.
+ */
+function parseCompleteJsonArgs(
+  raw: string,
+): Record<string, unknown> | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function stringifyUnknown(value: unknown, maxLen = 600): string {
@@ -146,9 +179,16 @@ function stringifyUnknown(value: unknown, maxLen = 600): string {
 export class QwenApiClient {
   constructor(private readonly browser?: QwenBrowserBridge) {}
 
+  /**
+   * @param onChatIdChanged Вызывается, когда клиент переключился на новый
+   * chat_id (занятый чат, обрыв связи, internal error). Провайдер кэширует
+   * chat_id на разговор, и без этого сигнала он продолжит слать запросы в
+   * мёртвый чат.
+   */
   async *sendMessageStream(
     params: AIRequestParams,
     token: string,
+    onChatIdChanged?: (chatId: string) => void,
   ): AsyncIterable<AIStreamChunk> {
     const normalizedToken = this.normalizeToken(token);
     const resolvedModelId = resolveModelId(params.model);
@@ -228,10 +268,7 @@ export class QwenApiClient {
         body: currentBody,
         abortSignal: params.abortSignal,
       });
-      yield* this.parseSSEText(
-        this.readResponseBody(response),
-        allowToolCalls,
-      );
+      yield* this.parseSSEText(this.readResponseBody(response), allowToolCalls);
     };
 
     try {
@@ -280,7 +317,11 @@ export class QwenApiClient {
         );
 
         let lastError: unknown = error;
-        const retryDelays = CHAT_IN_PROGRESS_RETRY_DELAYS_MS;
+        // Долго долбиться в занятый чат бессмысленно: ранний обрыв стрима
+        // (страж транскрипта или собранный tool_call) оставляет генерацию
+        // висеть на сервере, а stop_stream её не снимает — отвечает ok, но чат
+        // остаётся in progress. Пара попыток на случай гонки, дальше — новый чат.
+        const retryDelays = CHAT_IN_PROGRESS_RETRY_DELAYS_MS.slice(0, 2);
 
         for (let attempt = 0; attempt < retryDelays.length; attempt++) {
           await this.stopStream(normalizedToken, chatId).catch((stopErr) => {
@@ -316,7 +357,23 @@ export class QwenApiClient {
           }
         }
 
-        throw lastError;
+        log(
+          "[qwen-api] chat still in progress — switching to a NEW chat_id (history is resent in the prompt, nothing is lost)",
+        );
+        const freshChatId = await this.createChat(
+          normalizedToken,
+          apiModelType,
+        );
+        if (!freshChatId) {
+          throw lastError;
+        }
+        onChatIdChanged?.(freshChatId);
+        yield* sendOnce.call(
+          this,
+          { ...body, chat_id: freshChatId },
+          freshChatId,
+        );
+        return;
       }
 
       if (isNetworkTerminated && !params.abortSignal?.aborted) {
@@ -334,6 +391,7 @@ export class QwenApiClient {
           ...body,
           chat_id: newChatId,
         };
+        onChatIdChanged?.(newChatId);
         yield* sendOnce.call(this, retryBody, newChatId);
         return;
       }
@@ -355,6 +413,7 @@ export class QwenApiClient {
         }
 
         const retryBody = this.buildFreshChatRetryBody(body, freshChatId);
+        onChatIdChanged?.(freshChatId);
         yield* sendOnce.call(this, retryBody, freshChatId);
         return;
       }
@@ -469,9 +528,7 @@ export class QwenApiClient {
    * Декодирует тело прямого ответа в поток строковых чанков для parseSSEText.
    * При досрочном прекращении итерации (стоп-страж парсера) отменяет reader.
    */
-  private async *readResponseBody(
-    response: Response,
-  ): AsyncIterable<string> {
+  private async *readResponseBody(response: Response): AsyncIterable<string> {
     const body = response.body;
     if (!body) {
       throw new ProviderError(PROVIDER_ID, "Response body is empty");
@@ -512,10 +569,7 @@ export class QwenApiClient {
     abortSignal?: AbortSignal,
   ): AsyncIterable<AIStreamChunk> {
     if (!this.browser) {
-      throw new ProviderError(
-        PROVIDER_ID,
-        "Browser fallback is unavailable",
-      );
+      throw new ProviderError(PROVIDER_ID, "Browser fallback is unavailable");
     }
     const chunks = this.browser.streamChat({
       url: requestUrl,
@@ -528,12 +582,14 @@ export class QwenApiClient {
   }
 
   async createChat(token: string, model: string): Promise<string | undefined> {
+    // Поля и порядок — как в POST /api/v2/chats/new у веб-приложения.
     const payload = {
-      title: "New chat",
+      chatId: "",
       models: [model],
-      chat_mode: "normal",
-      chat_type: "t2t",
+      project_id: "",
       timestamp: Date.now(),
+      chat_type: "t2t",
+      chat_mode: "normal",
     };
 
     const result = await this.postCreateChat(token, payload);
@@ -558,7 +614,9 @@ export class QwenApiClient {
 
     const chatId = data?.data?.id ?? data?.data?.chat_id ?? data?.id;
     if (!chatId) {
-      log(`[qwen-api] createChat ok but no id in response: ${result.text.slice(0, 300)}`);
+      log(
+        `[qwen-api] createChat ok but no id in response: ${result.text.slice(0, 300)}`,
+      );
     }
     return chatId;
   }
@@ -845,7 +903,7 @@ export class QwenApiClient {
         ...(thinkingConfig.enabled
           ? { thinking_budget_tokens: thinkingConfig.budgetTokens }
           : {}),
-        ...(thinkingConfig.enabled ? { output_schema: "phase" } : {}),
+        output_schema: "phase",
       },
     };
 
@@ -898,6 +956,8 @@ export class QwenApiClient {
   ): AsyncIterable<AIStreamChunk> {
     let fullText = "";
     const nativeToolCalls: AIStreamChunk[] = [];
+    // Накопительный снимок текущего function_call (см. QwenStreamDelta).
+    let pendingFn: { name: string; args: string } | undefined;
     let chunkCount = 0;
     let lastPromptTokens = 0;
     let lastCompletionTokens = 0;
@@ -959,6 +1019,22 @@ export class QwenApiClient {
         const delta = choice.delta;
         if (!delta) continue;
 
+        // Qwen разрешает вызов инструмента в собственном серверном реестре
+        // (image-generation, code-interpreter, amap, fire-crawl). Наших имён там
+        // нет, и отказ прилетает отдельной дельтой role=function с phase=answer:
+        //   {"role":"function","name":"read_file",
+        //    "content":"Tool read_file does not exists.","phase":"answer"}
+        // Это служебный канал их бэкенда, а не текст модели — в ответ он попадать
+        // не должен.
+        if (delta.role === "function") {
+          log(
+            `[qwen-api] server-side tool rejection name=${delta.name ?? "?"} content=${(
+              delta.content ?? ""
+            ).slice(0, 120)}`,
+          );
+          continue;
+        }
+
         const phase = String(delta.phase ?? "answer").toLowerCase();
         const rawContent = delta.content ?? "";
         // У Qwen thinking может приходить либо в reasoning_content,
@@ -1009,6 +1085,40 @@ export class QwenApiClient {
               argumentsPart: toolCall.function?.arguments ?? "",
             }),
           );
+        }
+
+        // Собственно вызов инструмента Qwen кладёт в function_call. Он же
+        // пытается исполнить его в своём MCP-реестре, где наших имён нет, и
+        // отдаёт отказ role=function — но сам вызов до этого приходит целиком,
+        // и его достаточно, чтобы отработал VS Code.
+        const fnCall = delta.function_call;
+        if (fnCall && nativeToolCalls.length === 0) {
+          const name = fnCall.name || pendingFn?.name || "";
+          const args = fnCall.arguments ?? "";
+
+          // Снимки накопительные, поэтому укоротившиеся аргументы или новое имя
+          // означают начало следующего вызова.
+          if (
+            pendingFn &&
+            (pendingFn.name !== name || args.length < pendingFn.args.length)
+          ) {
+            pendingFn = undefined;
+          }
+          pendingFn = { name, args };
+
+          const parsedArgs = parseCompleteJsonArgs(args);
+          if (parsedArgs && name) {
+            chunkCount++;
+            nativeToolCalls.push(
+              createToolCallChunk({
+                name,
+                argumentsValue: parsedArgs,
+              }),
+            );
+            log(
+              `[qwen-api] recovered function_call name=${name} args=${args.slice(0, 200)}`,
+            );
+          }
         }
       }
     };
@@ -1082,6 +1192,14 @@ export class QwenApiClient {
         log(
           "[qwen-api] transcript boundary detected (fabricated User/Tool-result turn) — stopping stream",
         );
+        break;
+      }
+
+      // Вызов собран — дальше Qwen отвергнет его в своём реестре и модель начнёт
+      // выкручиваться вокруг несуществующей ошибки. Этот хвост нам не нужен:
+      // отдаём вызов в VS Code, результат придёт следующим запросом.
+      if (allowToolCalls && nativeToolCalls.length > 0) {
+        log("[qwen-api] function_call recovered — stopping stream");
         break;
       }
 
