@@ -11,7 +11,7 @@ const log = createLogger("kimi");
 
 export class KimiProvider extends BaseAIProvider {
   readonly id = "ai-free-vscode-kimi";
-  readonly displayName = "Kimi (Free)";
+  readonly displayName = "Kimi (Web)";
 
   private readonly authManager = new KimiAuthManager();
   private readonly apiClient = new KimiApiClient();

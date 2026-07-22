@@ -19,7 +19,7 @@ export interface MimoModelRoute {
 export const MIMO_MODELS: AIModelInfo[] = [
   {
     id: "mimo-auto",
-    name: "MiMo Auto (free)",
+    name: "MiMo Auto",
     family: "MiMo",
     maxInputTokens: 1000000,
     maxOutputTokens: 128000,

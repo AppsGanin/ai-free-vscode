@@ -9,7 +9,7 @@ import { DEEPSEEK_MODELS } from "./DeepSeekModels";
 
 export class DeepSeekProvider extends BaseAIProvider {
   readonly id = "ai-free-vscode-deepseek";
-  readonly displayName = "DeepSeek (Free)";
+  readonly displayName = "DeepSeek (Web)";
 
   private readonly authManager = new DeepSeekAuthManager();
   private readonly apiClient = new DeepSeekApiClient();

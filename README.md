@@ -80,7 +80,7 @@ session — no API key, no sign-in, nothing stored by the extension.
 
 | Model            | ID          | Context |
 | ---------------- | ----------- | ------- |
-| MiMo Auto (free) | `mimo-auto` | 1M      |
+| MiMo Auto        | `mimo-auto` | 1M      |
 
 Setup is the install itself:
 
