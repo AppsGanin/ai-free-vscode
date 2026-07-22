@@ -109,18 +109,20 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
       return [];
     }
 
-    return availableModels.map((model) => ({
-      id: model.id,
-      name: model.name,
-      family: model.family,
-      version: model.version ?? "1.0.0",
-      maxInputTokens: model.maxInputTokens,
-      maxOutputTokens: model.maxOutputTokens,
-      capabilities: {
-        toolCalling: model.capabilities.toolCalling ?? false,
-        imageInput: model.capabilities.imageInput ?? false,
-      },
-    }));
+    return availableModels
+      .filter((model) => model.capabilities.chat !== false)
+      .map((model) => ({
+        id: model.id,
+        name: model.name,
+        family: model.family,
+        version: model.version ?? "1.0.0",
+        maxInputTokens: model.maxInputTokens,
+        maxOutputTokens: model.maxOutputTokens,
+        capabilities: {
+          toolCalling: model.capabilities.toolCalling ?? false,
+          imageInput: model.capabilities.imageInput ?? false,
+        },
+      }));
   }
 
   async provideLanguageModelChatResponse(

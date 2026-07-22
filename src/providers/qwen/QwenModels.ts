@@ -4,6 +4,15 @@ import type { AIModelInfo } from "../types";
 // Актуальный список моделей получен с https://chat.qwen.ai/api/models
 // Оставлены только стабильные флагманы линеек: без preview-веток, без малых и
 // A3B-моделей (ломают tool calling) и без Omni (нет thinking).
+
+/** Все фичи расширения: thinking у Qwen выключается настройкой. */
+const QWEN_FEATURES = {
+  chat: true,
+  commit: true,
+  suggestions: true,
+  fix: true,
+} as const;
+
 export const QWEN_MODELS: AIModelInfo[] = [
   // ─── Qwen 3.7 ────────────────────────────────────────────────────────────
   {
@@ -17,6 +26,7 @@ export const QWEN_MODELS: AIModelInfo[] = [
       streaming: true,
       imageInput: true,
       thinking: true,
+      ...QWEN_FEATURES,
     },
   },
   {
@@ -25,7 +35,12 @@ export const QWEN_MODELS: AIModelInfo[] = [
     family: "Qwen3.7",
     maxInputTokens: 1000000,
     maxOutputTokens: 65536,
-    capabilities: { toolCalling: true, streaming: true, thinking: true },
+    capabilities: {
+      toolCalling: true,
+      streaming: true,
+      thinking: true,
+      ...QWEN_FEATURES,
+    },
   },
   // ─── Qwen 3.6 ────────────────────────────────────────────────────────────
   {
@@ -39,6 +54,7 @@ export const QWEN_MODELS: AIModelInfo[] = [
       streaming: true,
       imageInput: true,
       thinking: true,
+      ...QWEN_FEATURES,
     },
   },
   // ─── Qwen 3.5 ────────────────────────────────────────────────────────────
@@ -53,6 +69,7 @@ export const QWEN_MODELS: AIModelInfo[] = [
       streaming: true,
       imageInput: true,
       thinking: true,
+      ...QWEN_FEATURES,
     },
   },
 ];

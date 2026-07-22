@@ -284,15 +284,12 @@ async function fixProblem(
     async (_progress, token): Promise<string | undefined> => {
       let acc = "";
       try {
-        const response = await model.sendRequest(
-          [
-            vscode.LanguageModelChatMessage.User(SYSTEM_PROMPT),
-            vscode.LanguageModelChatMessage.User(userPrompt),
-          ],
-          { modelOptions: { thinkingMode: "off" } },
+        const response = model.sendText(
+          [SYSTEM_PROMPT, userPrompt],
+          { thinkingMode: "off" },
           token,
         );
-        for await (const part of response.text) {
+        for await (const part of response) {
           if (token.isCancellationRequested) {
             return undefined;
           }

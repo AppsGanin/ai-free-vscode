@@ -187,15 +187,15 @@ async function generateCommitMessage(scmArg?: unknown): Promise<void> {
     },
     async (_progress, token) => {
       try {
-        const response = await model.sendRequest(
-          [vscode.LanguageModelChatMessage.User(userPrompt)],
+        const response = model.sendText(
+          [userPrompt],
           // Reasoning не нужен для коммитов — только добавляет задержку.
-          { modelOptions: { thinkingMode: "off" } },
+          { thinkingMode: "off" },
           token,
         );
 
         let acc = "";
-        for await (const part of response.text) {
+        for await (const part of response) {
           if (token.isCancellationRequested) {
             break;
           }

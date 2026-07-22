@@ -10,6 +10,17 @@ export interface AIModelCapabilities {
   imageInput?: boolean;
   /** Поддержка thinking-режима */
   thinking?: boolean;
+  /** Годится для inline-подсказок. `false` убирает её из выбора. */
+  suggestions?: boolean;
+  /** Годится для генерации коммит-сообщений. `false` убирает её из выбора. */
+  commit?: boolean;
+  /** Годится для «Fix with AI». `false` убирает её из выбора. */
+  fix?: boolean;
+  /**
+   * Годится для чата. `false` убирает модель из списка VS Code целиком —
+   * а значит и из остальных фич, они берут модели оттуда же.
+   */
+  chat?: boolean;
   /** Поддержка потокового режима */
   streaming?: boolean;
 }

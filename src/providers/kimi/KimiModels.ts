@@ -9,7 +9,14 @@ export const KIMI_MODELS: AIModelInfo[] = [
     family: "Kimi",
     maxInputTokens: 131072,
     maxOutputTokens: 16384,
-    capabilities: { streaming: true, thinking: true },
+    capabilities: {
+      streaming: true,
+      thinking: true,
+      chat: false,
+      commit: true,
+      suggestions: true,
+      fix: true,
+    },
   },
 ];
 

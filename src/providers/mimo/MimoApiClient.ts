@@ -21,6 +21,16 @@ const SESSION_TITLE = "AI Free VSCode";
  * не задела запрос соседнего окна VS Code, работающего с тем же каталогом.
  */
 const STALE_SESSION_AGE_MS = 10 * 60 * 1000;
+/** Сколько картинок максимум уходит в один запрос. */
+const MAX_IMAGES = 8;
+/** Пауза между abort и delete: сервер сворачивает генерацию не мгновенно. */
+const ABORT_SETTLE_MS = 1000;
+
+const delay = (ms: number) =>
+  new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 
 interface SseEvent {
   type: string;
@@ -31,6 +41,14 @@ interface PendingItem {
   partID: string;
   kind: "delta" | "full";
   value: string;
+}
+
+/** Картинка, уходящая отдельной частью сообщения. */
+interface MimoAttachment {
+  mime: string;
+  filename: string;
+  /** data:image/…;base64,… — ссылки на внешние URL сервер не принимает. */
+  url: string;
 }
 
 export class MimoApiClient {
@@ -140,8 +158,9 @@ export class MimoApiClient {
     }
 
     const content = this.buildContent(params.messages, toolsPrompt);
+    const images = this.collectImages(params.messages);
     log.info(
-      `request model=${route.providerID}/${route.modelID} hasTools=${hasTools} contentChars=${content.length}`,
+      `request model=${route.providerID}/${route.modelID} hasTools=${hasTools} contentChars=${content.length} images=${images.length}`,
     );
 
     // SSE подписываемся ДО отправки сообщения, иначе первые дельты потеряются.
@@ -174,6 +193,7 @@ export class MimoApiClient {
         sessionID,
         route,
         content,
+        images,
         streamAbort.signal,
       ).catch((err: unknown) => {
         postError = err;
@@ -246,6 +266,7 @@ export class MimoApiClient {
     sessionID: string,
     route: { providerID: string; modelID: string },
     content: string,
+    images: MimoAttachment[],
     signal: AbortSignal,
   ): Promise<void> {
     const res = await fetch(
@@ -259,7 +280,16 @@ export class MimoApiClient {
         body: JSON.stringify({
           agent: this.server.agent,
           model: { providerID: route.providerID, modelID: route.modelID },
-          parts: [{ type: "text", text: content }],
+          // Текст первым, картинки следом — тот же порядок, что шлёт `mimo run -f`.
+          parts: [
+            { type: "text", text: content },
+            ...images.map((image) => ({
+              type: "file",
+              mime: image.mime,
+              filename: image.filename,
+              url: image.url,
+            })),
+          ],
         }),
         signal,
       },
@@ -279,6 +309,7 @@ export class MimoApiClient {
   ): Promise<void> {
     if (!finished) {
       await this.abortSession(handle, sessionID);
+      await delay(ABORT_SETTLE_MS);
     }
     await this.deleteSession(handle, sessionID);
   }
@@ -632,6 +663,49 @@ export class MimoApiClient {
       content = `${content.trim()}\n\n${toolsPrompt}`;
     }
     return content;
+  }
+
+  /**
+   * Картинки из истории — отдельными file-частями: в тексте они остаются
+   * пометкой `[image]`, а сюда попадает сам файл.
+   */
+  private collectImages(messages: AIMessage[]): MimoAttachment[] {
+    const images: MimoAttachment[] = [];
+    let skipped = 0;
+
+    for (const message of messages) {
+      if (typeof message.content === "string") continue;
+
+      for (const part of message.content) {
+        if (part.type !== "image_url") continue;
+
+        const url = part.imageUrl.url.trim();
+        const match = /^data:(image\/[\w.+-]+);base64,/i.exec(url);
+        if (!match) {
+          skipped++;
+          continue;
+        }
+        if (images.length >= MAX_IMAGES) {
+          skipped++;
+          continue;
+        }
+
+        const mime = match[1].toLowerCase();
+        const ext = mime.split("/")[1]?.replace("jpeg", "jpg") ?? "png";
+        images.push({
+          mime,
+          filename: `image-${images.length + 1}.${ext}`,
+          url,
+        });
+      }
+    }
+
+    if (skipped > 0) {
+      log.warn(
+        `${skipped} image(s) not sent: only base64 data URLs are accepted, max ${MAX_IMAGES} per request`,
+      );
+    }
+    return images;
   }
 
   private lastUserText(messages: AIMessage[]): string {

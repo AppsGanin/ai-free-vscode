@@ -11,6 +11,7 @@ import { AuthExpiredError, RateLimitError } from "./providers/types";
 import { registerCommitMessageCommands } from "./vscode/CommitMessageGenerator";
 import { registerFixProblem } from "./vscode/FixProblemProvider";
 import { registerInlineCompletions } from "./vscode/InlineCompletionProvider";
+import { setFeatureBackend } from "./vscode/ModelPicker";
 import { ProviderRegistry } from "./vscode/ProviderRegistry";
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -46,6 +47,9 @@ export function activate(context: vscode.ExtensionContext): void {
   // Единый провайдер для общего списка моделей в VS Code model picker.
   const unifiedProvider = new UnifiedProvider(subProviders);
   registry.register(unifiedProvider);
+
+
+  setFeatureBackend(unifiedProvider, context.secrets);
 
   // ─── Слушаем ошибки авторизации от провайдеров ────────────────────────────
   for (const [id, provider] of registry.getAll()) {

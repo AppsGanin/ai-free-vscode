@@ -64,17 +64,16 @@ export class UnifiedProvider extends BaseAIProvider {
         }
         seen.add(model.id);
 
-        const prefixedName = model.name.startsWith(`[${providerTag}] `)
-          ? model.name
-          : `[${providerTag}] ${model.name}`;
-
+        // Имя модели показываем как есть: в picker'е оно и так узнаваемо
+        // («Qwen3.7 Plus», «Kimi K2.5»), а префикс `[Qwen]` только съедал место.
+        // Провайдер при этом остаётся в family — по нему идёт группировка и
+        // поиск модели в настройках.
         const prefixedFamily = model.family.startsWith(`${providerTag}/`)
           ? model.family
           : `${providerTag}/${model.family}`;
 
         all.push({
           ...model,
-          name: prefixedName,
           family: prefixedFamily,
         });
       }

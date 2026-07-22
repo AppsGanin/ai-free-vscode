@@ -20,10 +20,64 @@ const SYSTEM_PROMPT = [
   "- If no useful completion is possible, return an empty response.",
 ].join("\n");
 
+/** По истечении срока не ждём дальше, а отдаём накопленное. */
+const SOFT_DEADLINE_MS = 30000;
+const MAX_COMPLETION_CHARS = 600;
+const MAX_COMPLETION_LINES = 12;
+const STATUS_NOTICE_MS = 2500;
+
 interface SuggestionConfig {
   enabled: boolean;
   maxPrefixChars: number;
   maxSuffixChars: number;
+}
+
+/** Индикатор: без него провал подсказки неотличим от «ничего не нажалось». */
+class SuggestionStatus {
+  private readonly item: vscode.StatusBarItem;
+  private noticeTimer?: NodeJS.Timeout;
+
+  constructor() {
+    this.item = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Right,
+      100,
+    );
+  }
+
+  busy(modelName: string): void {
+    this.clearNotice();
+    this.item.text = "$(sync~spin) AI Free: suggesting…";
+    this.item.tooltip = `Inline suggestion from ${modelName}`;
+    this.item.command = undefined;
+    this.item.show();
+  }
+
+  /** Кликабельно: ведёт в выбор модели — обычно дело в ней. */
+  notice(text: string, tooltip: string): void {
+    this.clearNotice();
+    this.item.text = text;
+    this.item.tooltip = `${tooltip} — click to change the completions model`;
+    this.item.command = `${VENDOR}.selectSuggestionsModel`;
+    this.item.show();
+    this.noticeTimer = setTimeout(() => this.idle(), STATUS_NOTICE_MS);
+  }
+
+  idle(): void {
+    this.clearNotice();
+    this.item.hide();
+  }
+
+  dispose(): void {
+    this.clearNotice();
+    this.item.dispose();
+  }
+
+  private clearNotice(): void {
+    if (this.noticeTimer) {
+      clearTimeout(this.noticeTimer);
+      this.noticeTimer = undefined;
+    }
+  }
 }
 
 function readConfig(): SuggestionConfig {
@@ -72,9 +126,39 @@ function trimOverlap(prefix: string, completion: string): string {
   return completion;
 }
 
+function isEnough(text: string): boolean {
+  if (text.length >= MAX_COMPLETION_CHARS) {
+    return true;
+  }
+  let lines = 1;
+  for (const ch of text) {
+    if (ch === "\n" && ++lines > MAX_COMPLETION_LINES) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Ранняя остановка режет поток не по границе строки — дочищаем здесь. */
+function limitLines(text: string): string {
+  const lines = text.split("\n");
+  const limited =
+    lines.length > MAX_COMPLETION_LINES
+      ? lines.slice(0, MAX_COMPLETION_LINES).join("\n")
+      : text;
+  return limited.length > MAX_COMPLETION_CHARS
+    ? limited.slice(0, MAX_COMPLETION_CHARS)
+    : limited;
+}
+
 class FreeAIInlineCompletionProvider
   implements vscode.InlineCompletionItemProvider
 {
+  /** Номер последнего запроса: статус-бар слушается только его. */
+  private seq = 0;
+
+  constructor(private readonly status: SuggestionStatus) {}
+
   async provideInlineCompletionItems(
     document: vscode.TextDocument,
     position: vscode.Position,
@@ -124,44 +208,95 @@ class FreeAIInlineCompletionProvider
       "Insert the completion at the cursor (between BEFORE and AFTER):",
     ].join("\n");
 
+    const startedAt = Date.now();
+    const elapsed = () => Date.now() - startedAt;
+
+    // Индикатор мог перехватить более свежий запрос — гасить его нельзя.
+    const mine = ++this.seq;
+    const status = {
+      busy: (name: string) => mine === this.seq && this.status.busy(name),
+      notice: (text: string, tip: string) =>
+        mine === this.seq && this.status.notice(text, tip),
+      idle: () => mine === this.seq && this.status.idle(),
+    };
+
+    // Свой токен поверх редакторского — чтобы обрывать генерацию самим.
+    const cts = new vscode.CancellationTokenSource();
+    const linked = token.onCancellationRequested(() => cts.cancel());
+    let stoppedByUs = false;
+    const stopEarly = () => {
+      stoppedByUs = true;
+      cts.cancel();
+    };
+    const deadline = setTimeout(stopEarly, SOFT_DEADLINE_MS);
+
     let acc = "";
+    let failure: string | undefined;
+
+    status.busy(model.name);
     try {
-      const response = await model.sendRequest(
-        [
-          vscode.LanguageModelChatMessage.User(SYSTEM_PROMPT),
-          vscode.LanguageModelChatMessage.User(userPrompt),
-        ],
+      const response = model.sendText(
+        [SYSTEM_PROMPT, userPrompt],
         // Reasoning не нужен для подсказок — только добавляет задержку.
-        { modelOptions: { thinkingMode: "off" } },
-        token,
+        { thinkingMode: "off" },
+        cts.token,
       );
 
-      for await (const part of response.text) {
+      for await (const part of response) {
         if (token.isCancellationRequested) {
-          return undefined;
+          break;
         }
         acc += part;
+        if (isEnough(acc)) {
+          stopEarly();
+          break;
+        }
       }
     } catch (err) {
-      if (token.isCancellationRequested) {
-        return undefined;
+      // Отмена по дедлайну — не ошибка: накопленное годится.
+      if (!stoppedByUs && !token.isCancellationRequested) {
+        failure = err instanceof Error ? err.message : String(err);
       }
-      const msg = err instanceof Error ? err.message : String(err);
-      log(`[suggestions] generation error: ${msg}`);
+    } finally {
+      clearTimeout(deadline);
+      linked.dispose();
+      cts.dispose();
+    }
+
+    if (failure) {
+      log(`[suggestions] error after ${elapsed()}ms — ${failure}`);
+      status.notice("$(warning) AI Free: suggestion failed", failure);
       return undefined;
     }
 
-    const completion = trimOverlap(prefix, stripCodeFences(acc)).replace(
-      /\s+$/,
-      "",
-    );
+    if (token.isCancellationRequested) {
+      log(
+        `[suggestions] cancelled by editor after ${elapsed()}ms (received ${acc.length} chars)`,
+      );
+      status.idle();
+      return undefined;
+    }
+
+    const completion = limitLines(
+      trimOverlap(prefix, stripCodeFences(acc)),
+    ).replace(/\s+$/, "");
+
     if (!completion) {
+      // Чаще всего это модель, ушедшая в reasoning и не отдавшая текста.
+      log(
+        `[suggestions] empty completion after ${elapsed()}ms model=${model.id} (raw ${acc.length} chars)`,
+      );
+      status.notice(
+        "$(circle-slash) AI Free: no suggestion",
+        `${model.name} returned nothing usable`,
+      );
       return undefined;
     }
 
     log(
-      `[suggestions] model=${model.id} lang=${document.languageId} chars=${completion.length}`,
+      `[suggestions] model=${model.id} lang=${document.languageId} chars=${completion.length} in ${elapsed()}ms${stoppedByUs ? " (stopped early)" : ""}`,
     );
+    status.idle();
 
     return [
       new vscode.InlineCompletionItem(
@@ -175,10 +310,13 @@ class FreeAIInlineCompletionProvider
 export function registerInlineCompletions(
   context: vscode.ExtensionContext,
 ): void {
+  const status = new SuggestionStatus();
+  context.subscriptions.push(status);
+
   context.subscriptions.push(
     vscode.languages.registerInlineCompletionItemProvider(
       { pattern: "**" },
-      new FreeAIInlineCompletionProvider(),
+      new FreeAIInlineCompletionProvider(status),
     ),
   );
 

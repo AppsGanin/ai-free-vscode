@@ -9,7 +9,15 @@ export const DEEPSEEK_MODELS: AIModelInfo[] = [
     version: "1.0.0",
     maxInputTokens: 131072,
     maxOutputTokens: 8192,
-    capabilities: { toolCalling: true, streaming: true, thinking: true },
+    capabilities: {
+      toolCalling: true,
+      streaming: true,
+      thinking: true,
+      chat: true,
+      commit: true,
+      suggestions: true,
+      fix: true,
+    },
   },
   {
     id: "deepseek-expert",
@@ -18,7 +26,15 @@ export const DEEPSEEK_MODELS: AIModelInfo[] = [
     version: "1.0.0",
     maxInputTokens: 131072,
     maxOutputTokens: 8192,
-    capabilities: { toolCalling: true, streaming: true, thinking: true },
+    capabilities: {
+      toolCalling: true,
+      streaming: true,
+      thinking: true,
+      chat: true,
+      commit: true,
+      suggestions: true,
+      fix: true,
+    },
   },
 ];
 

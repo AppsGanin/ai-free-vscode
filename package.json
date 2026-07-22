@@ -60,7 +60,7 @@
       },
       {
         "command": "free-ai-vscode.triggerInlineSuggestion",
-        "title": "AI Free VSCode — Inline Suggestion (Ghost Text)"
+        "title": "AI Free VSCode — Suggest Code at Cursor"
       },
       {
         "command": "free-ai-vscode.selectSuggestionsModel",
@@ -143,7 +143,7 @@
         "freeAI.suggestions.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Enable manual inline suggestions (ghost text) from the free models. Trigger via the 'AI Free VSCode — Inline Suggestion' command or the Ctrl/Cmd+Alt+\\ hotkey. Note: latency is higher than Copilot (web session + PoW)."
+          "description": "Enable on-demand code suggestions from the free models. They never appear while you type: trigger them with the 'AI Free VSCode — Suggest Code at Cursor' command or the Ctrl/Cmd+Alt+\\ hotkey, and the result is inserted as ghost text. Note: latency is higher than Copilot."
         },
         "freeAI.suggestions.model": {
           "type": "string",

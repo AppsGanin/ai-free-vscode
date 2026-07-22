@@ -65,12 +65,11 @@ dead entries that fail on use.
 | --------- | ----------- | ------- |
 | Kimi K2.5 | `kimi-k2.5` | 128K    |
 
-> ⚠️ **Tool calling is disabled for Kimi** (it is not advertised as a
-> tool-capable model, so VS Code won't pick it for agent/tool turns). Instead of
-> the text tool-call protocol, Kimi falls back to its built-in `ipython` code
-> interpreter and runs a server-side agent loop we cannot feed results to —
-> slow (often minutes) and unreliable. Use Kimi for plain chat; pick Qwen or
-> DeepSeek when you need tools.
+> ⚠️ **Kimi is kept out of Copilot Chat** (`chat: false`). Given tools it
+> ignores the text tool-call protocol and falls back to its built-in `ipython`
+> code interpreter, running a server-side agent loop we cannot feed results to —
+> slow (often minutes) and unreliable. It stays available for commit messages,
+> inline suggestions and Quick Fix, where no tools are involved.
 
 ### MiMo Code (CLI)
 
@@ -209,21 +208,35 @@ straight into the commit input box.
 - Prompt: `freeAI.commit.prompt` (Conventional Commits, English by default)
 - Pick a model quickly: command `AI Free VSCode — Change Commit Model`
 
+Every model declares which features it is fit for — `chat`, `commit`,
+`suggestions`, `fix` — and each picker lists only the fit ones. MiMo Auto opts
+out of commits and inline suggestions (its reasoning cannot be turned off, so it
+spends the whole request thinking), and Kimi opts out of chat. The flags are
+independent: commit, suggestions and Quick Fix talk to the providers directly,
+so a model hidden from chat still works for them.
+
 ### Inline suggestions (ghost text)
 
 On-demand code completion at the cursor. It is **manual only** — it never fires
 while typing.
 
 - Trigger: `Ctrl+Alt+\` (Mac `Cmd+Alt+\`), or command
-  `AI Free VSCode — Inline suggestion`, or the built-in _Trigger Inline Suggestion_
+  `AI Free VSCode — Suggest Code at Cursor`, or the built-in _Trigger Inline Suggestion_
 - Accept with `Tab`, dismiss with `Esc`
 - Enable first: set `freeAI.suggestions.enabled` to `true` (the hotkey will offer
   to enable it)
 - Model: `freeAI.suggestions.model` (`auto` = first available)
 - Pick a model quickly: command `AI Free VSCode — Change Completions Model`
 
+While a suggestion is being generated the status bar shows
+`AI Free: suggesting…`; if nothing usable comes back it briefly says so instead
+of failing silently. Generation stops on its own after 30 seconds, 12 lines or
+600 characters — whichever comes first — and whatever arrived by then is offered
+as the suggestion.
+
 > These backends run through a web session (DeepSeek also solves a PoW challenge),
-> so expect noticeably higher latency than native Copilot.
+> so expect noticeably higher latency than native Copilot. If Copilot itself is
+> active, its suggestion usually wins the race and you see that one instead.
 
 ### Fix with AI (Quick Fix)
 

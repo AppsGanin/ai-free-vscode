@@ -23,7 +23,16 @@ export const MIMO_MODELS: AIModelInfo[] = [
     family: "MiMo",
     maxInputTokens: 1000000,
     maxOutputTokens: 128000,
-    capabilities: { toolCalling: true, streaming: true },
+    capabilities: {
+      toolCalling: true,
+      streaming: true,
+      thinking: true,
+      imageInput: true,
+      chat: true,
+      fix: true,
+      suggestions: false,
+      commit: false,
+    },
   },
 ];
 
