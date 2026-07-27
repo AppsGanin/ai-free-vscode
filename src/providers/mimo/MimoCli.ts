@@ -16,6 +16,14 @@ const BIN_NAMES = IS_WINDOWS ? ["mimo.cmd", "mimo.exe", "mimo"] : ["mimo"];
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const EXEC_TIMEOUT_MS = 20000;
 
+/**
+ * Workbench action that opens a shell on the machine hosting the VS Code UI.
+ * Registered only while a remote connection is open.
+ */
+const NEW_LOCAL_TERMINAL = "workbench.action.terminal.newLocal";
+const RENAME_TERMINAL = "workbench.action.terminal.renameWithArg";
+const LOCAL_TERMINAL_TIMEOUT_MS = 5000;
+
 let cachedBinary: { path: string | undefined; at: number } | undefined;
 let cachedModels: { routes: string[]; at: number } | undefined;
 
@@ -56,7 +64,14 @@ export async function resolveMimoBinary(): Promise<string | undefined> {
     }
   }
 
-  clog.debug("binary not found (mimo CLI is not installed?)");
+  // The searched roots go into the log: in a remote window they describe the
+  // local machine, which is the usual surprise in bug reports.
+  const where = vscode.env.remoteName
+    ? `local machine (window is ${vscode.env.remoteName})`
+    : "local machine";
+  clog.debug(
+    `binary not found (mimo CLI is not installed?) searched the ${where}, home=${os.homedir()}`,
+  );
   cachedBinary = { path: undefined, at: now };
   return undefined;
 }
@@ -119,12 +134,97 @@ export function cliEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   };
 }
 
-/** Opens a VS Code terminal running the given CLI commands (install/setup). */
-export function runInTerminal(name: string, ...commands: string[]): void {
-  const terminal = vscode.window.createTerminal({ name });
+/**
+ * Runs CLI commands in a terminal **on the machine the extension host lives on**.
+ *
+ * This matters in a Remote-SSH window: the extension is UI-only (the browser
+ * sign-ins need a display), so it runs locally and only ever sees local
+ * binaries — but a plain `createTerminal()` opens a shell on the *server*, which
+ * used to install the CLI exactly where `resolveMimoBinary()` can never find it.
+ *
+ * Returns false when no local terminal could be opened; the commands are handed
+ * to the user through the clipboard instead.
+ */
+export async function runInTerminal(
+  name: string,
+  ...commands: string[]
+): Promise<boolean> {
+  const terminal = await createLocalTerminal(name);
+  if (!terminal) {
+    await offerCommandsForLocalShell(commands);
+    return false;
+  }
+
   terminal.show(true);
   for (const command of commands) {
     terminal.sendText(command, true);
+  }
+  return true;
+}
+
+/** True when the CLI would be installed on a different machine than we look at. */
+export function isRemoteWindow(): boolean {
+  return Boolean(vscode.env.remoteName);
+}
+
+async function createLocalTerminal(
+  name: string,
+): Promise<vscode.Terminal | undefined> {
+  if (!isRemoteWindow()) {
+    return vscode.window.createTerminal({ name });
+  }
+
+  const available = await vscode.commands.getCommands(true);
+  if (!available.includes(NEW_LOCAL_TERMINAL)) {
+    clog.warn(
+      `${NEW_LOCAL_TERMINAL} is unavailable — cannot reach a local shell`,
+    );
+    return undefined;
+  }
+
+  // A workbench action returns nothing, so the new terminal has to be caught
+  // through the open event.
+  let subscription: vscode.Disposable | undefined;
+  const opened = new Promise<vscode.Terminal | undefined>((resolve) => {
+    subscription = vscode.window.onDidOpenTerminal((terminal) =>
+      resolve(terminal),
+    );
+    setTimeout(() => resolve(undefined), LOCAL_TERMINAL_TIMEOUT_MS);
+  });
+
+  try {
+    await vscode.commands.executeCommand(NEW_LOCAL_TERMINAL);
+    const terminal = await opened;
+    if (!terminal) {
+      clog.warn(`${NEW_LOCAL_TERMINAL} opened no terminal`);
+      return undefined;
+    }
+
+    clog.debug(`local terminal opened in a ${vscode.env.remoteName} window`);
+    // newLocal leaves the terminal active, so the rename lands on it.
+    await vscode.commands
+      .executeCommand(RENAME_TERMINAL, { name })
+      .then(undefined, () => undefined);
+    return terminal;
+  } catch (err) {
+    clog.warn(`local terminal failed — ${errToString(err)}`);
+    return undefined;
+  } finally {
+    subscription?.dispose();
+  }
+}
+
+/** Last resort: the user runs the commands in their own local shell. */
+async function offerCommandsForLocalShell(commands: string[]): Promise<void> {
+  const script = commands.join(" && ");
+  const copy = "Copy Command";
+  const choice = await vscode.window.showWarningMessage(
+    "MiMo Code CLI has to be installed on the machine running the VS Code window, not on the remote host — this extension runs UI-side and only sees local binaries.",
+    { modal: true, detail: `Run in a local terminal:\n\n${script}` },
+    copy,
+  );
+  if (choice === copy) {
+    await vscode.env.clipboard.writeText(script);
   }
 }
 

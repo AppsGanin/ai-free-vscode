@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { createLogger } from "../../logger";
 import {
   invalidateMimoCliCache,
+  isRemoteWindow,
   listCliModelRoutes,
   resolveMimoBinary,
   runInTerminal,
@@ -68,10 +69,11 @@ export class MimoAuthManager {
 
     // CLI present but offering nothing — usually its first-run wizard is unfinished.
     alog.warn("CLI found but MiMo Auto is not available");
-    runInTerminal("MiMo Code — Setup", `"${bin}"`);
-    vscode.window.showInformationMessage(
-      "MiMo Code CLI reports no free model. Finish its first-run setup in the opened terminal (choose MiMo Auto), then run “AI Free VSCode — Status”.",
-    );
+    if (await runInTerminal("MiMo Code — Setup", `"${bin}"`)) {
+      vscode.window.showInformationMessage(
+        "MiMo Code CLI reports no free model. Finish its first-run setup in the opened terminal (choose MiMo Auto), then run “AI Free VSCode — Status”.",
+      );
+    }
   }
 
   /** Nothing to sign out of; just forget the cached CLI state. */
@@ -103,14 +105,22 @@ export class MimoAuthManager {
       ],
       {
         title: "MiMo Code CLI is not installed",
-        placeHolder:
-          "The provider runs through the mimo CLI (no API key, no sign-in)",
+        placeHolder: isRemoteWindow()
+          ? "The CLI is installed on your local machine — the extension runs UI-side, not on the remote host"
+          : "The provider runs through the mimo CLI (no API key, no sign-in)",
         ignoreFocusOut: true,
       },
     );
     if (!selected) return;
 
     if (!selected.command) {
+      if (isRemoteWindow()) {
+        // A path picked in a remote window naturally describes the server, and
+        // the extension resolves it against the local filesystem.
+        vscode.window.showWarningMessage(
+          "Point freeAI.mimo.path at the CLI on your local machine and set it in User settings — a path from the remote host will not resolve.",
+        );
+      }
       await vscode.commands.executeCommand(
         "workbench.action.openSettings",
         "freeAI.mimo.path",
@@ -120,9 +130,10 @@ export class MimoAuthManager {
 
     alog.info(`install: ${selected.command}`);
     // Install, then `mimo` itself — its wizard finishes the free channel setup.
-    runInTerminal("MiMo Code — Install", selected.command, "mimo");
-    vscode.window.showInformationMessage(
-      "Installing MiMo Code CLI in the terminal. When it finishes, run “AI Free VSCode — Status”.",
-    );
+    if (await runInTerminal("MiMo Code — Install", selected.command, "mimo")) {
+      vscode.window.showInformationMessage(
+        "Installing MiMo Code CLI in the terminal. When it finishes, run “AI Free VSCode — Status”.",
+      );
+    }
   }
 }
