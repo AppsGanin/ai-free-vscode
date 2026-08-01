@@ -1,0 +1,300 @@
+/* Colours come from the workbench theme, so the page follows light/dark and
+   high-contrast without a palette of its own. */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0 24px 64px;
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+}
+
+main {
+  max-width: 880px;
+  margin: 0 auto;
+}
+
+h1 {
+  margin: 28px 0 4px;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+h2 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+h3 {
+  margin: 0 0 16px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.subtitle {
+  margin: 0 0 28px;
+  color: var(--vscode-descriptionForeground);
+}
+
+section {
+  margin-bottom: 20px;
+  padding: 18px 20px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 8px;
+  background: var(--vscode-editorWidget-background, transparent);
+}
+
+.hint {
+  margin: 0 0 14px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+}
+
+code,
+kbd {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.92em;
+}
+
+kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+  border-radius: 3px;
+}
+
+/* ── Rows (providers, endpoints) ──────────────────────────────────────── */
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+
+.rows .row:first-child {
+  border-top: none;
+}
+
+.grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.name {
+  display: block;
+  font-weight: 600;
+}
+
+.meta {
+  display: block;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.badge {
+  padding: 2px 8px;
+  border: 1px solid currentColor;
+  border-radius: 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.badge.on {
+  color: var(--vscode-testing-iconPassed, #3fb950);
+}
+
+.badge.off {
+  color: var(--vscode-descriptionForeground);
+}
+
+.empty {
+  padding: 6px 0;
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+/* ── Controls ─────────────────────────────────────────────────────────── */
+
+button {
+  padding: 4px 12px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+}
+
+button:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+button.secondary {
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+}
+
+button.secondary:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+button.ghost {
+  color: var(--vscode-foreground);
+  background: transparent;
+  border-color: var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+}
+
+button.ghost:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
+button.danger {
+  color: var(--vscode-errorForeground, #f85149);
+  background: transparent;
+  border-color: currentColor;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"],
+select,
+textarea {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+}
+
+select {
+  cursor: pointer;
+}
+
+textarea {
+  resize: vertical;
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+input:invalid {
+  border-color: var(--vscode-inputValidation-errorBorder, #be1100);
+}
+
+.field {
+  margin: 0 0 14px;
+}
+
+.field .hint {
+  display: block;
+  margin: 4px 0 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+@media (max-width: 540px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.check input {
+  width: auto;
+  margin: 0;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.status {
+  font-size: 12px;
+}
+
+.status.ok {
+  color: var(--vscode-testing-iconPassed, #3fb950);
+}
+
+.status.err {
+  color: var(--vscode-errorForeground, #f85149);
+}
+
+/* ── Endpoint form ────────────────────────────────────────────────────── */
+
+.card {
+  margin-top: 12px;
+  padding: 16px 18px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+  background: var(--vscode-editor-background);
+}
+
+details {
+  margin-top: 8px;
+}
+
+summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--vscode-textLink-foreground);
+}
+
+summary:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
+.details-body {
+  padding-top: 12px;
+}

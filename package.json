@@ -34,6 +34,11 @@
     ],
     "commands": [
       {
+        "command": "free-ai-vscode.settings",
+        "title": "AI Free VSCode — Open Settings",
+        "icon": "$(gear)"
+      },
+      {
         "command": "free-ai-vscode.login",
         "title": "AI Free VSCode — Sign In"
       },
@@ -91,89 +96,215 @@
         }
       ]
     },
-    "configuration": {
-      "title": "AI Free VSCode",
-      "properties": {
-        "freeAI.playwright.timeout": {
-          "type": "number",
-          "default": 120000,
-          "description": "Browser sign-in timeout in milliseconds"
-        },
-        "freeAI.qwen.browserMode": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "headed",
-            "headless"
-          ],
-          "enumDescriptions": [
-            "Try a hidden headless browser first, and automatically fall back to a minimized visible window only if the Qwen anti-bot blocks it (recommended)",
-            "Always use a real (minimized) browser window — most reliable against the anti-bot, but a window is created",
-            "Always headless with no window and no fallback — no window ever, but the anti-bot may block requests"
-          ],
-          "default": "auto",
-          "markdownDescription": "How the Qwen anti-bot (WAF) fallback browser runs. `auto` is recommended. Changing this needs a window reload."
-        },
-        "freeAI.mimo.path": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Path to the MiMo Code CLI executable (`mimo`). Leave empty to auto-detect in `~/.mimocode/bin` and `PATH`. The provider talks to a local `mimo serve` process, so no API key is needed — sign-in lives in the CLI."
-        },
-        "freeAI.debug": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable verbose DEBUG logs in the 'AI Free VSCode' output channel (auth flow, requests, streaming). Useful for troubleshooting."
-        },
-        "freeAI.commit.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show the ✨ commit message generation button in the Source Control view."
-        },
-        "freeAI.commit.model": {
-          "type": "string",
-          "default": "auto",
-          "markdownDescription": "Model for commit message generation. `auto` = first available. You can set a model id/family/name or pick one via the **AI Free VSCode — Change Commit Model** command."
-        },
-        "freeAI.commit.prompt": {
-          "type": "string",
-          "editPresentation": "multilineText",
-          "default": "Generate a commit message for the git diff below.\nRequirements:\n- Use Conventional Commits format: type(scope): summary (type = feat|fix|docs|style|refactor|perf|test|build|ci|chore).\n- Subject on a single line, imperative mood, max 72 characters.\n- Write the message in English.\n- For significant changes, add a short body after a blank line (a bullet list is allowed).\n- Reply with ONLY the commit message text: no markdown fences, no quotes, no explanations.",
-          "markdownDescription": "Instruction (prompt) for commit message generation. The git diff is appended to it automatically."
-        },
-        "freeAI.suggestions.enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable on-demand code suggestions from the free models. They never appear while you type: trigger them with the 'AI Free VSCode — Suggest Code at Cursor' command or the Ctrl/Cmd+Alt+\\ hotkey, and the result is inserted as ghost text. Note: latency is higher than Copilot."
-        },
-        "freeAI.suggestions.model": {
-          "type": "string",
-          "default": "auto",
-          "markdownDescription": "Model for inline suggestions. `auto` = first available. You can set a model id/family/name or pick one via the **AI Free VSCode — Change Completions Model** command."
-        },
-        "freeAI.suggestions.maxPrefixChars": {
-          "type": "number",
-          "default": 2000,
-          "minimum": 200,
-          "description": "How many characters of code BEFORE the cursor to send to the model."
-        },
-        "freeAI.suggestions.maxSuffixChars": {
-          "type": "number",
-          "default": 800,
-          "minimum": 0,
-          "description": "How many characters of code AFTER the cursor to send to the model."
-        },
-        "freeAI.fix.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show the 'Fix with AI Free' action in the Quick Fix lightbulb (⌘./Ctrl+.) on errors and warnings."
-        },
-        "freeAI.fix.model": {
-          "type": "string",
-          "default": "auto",
-          "markdownDescription": "Model for fixing problems. `auto` = first available. You can set a model id/family/name or pick one via the **AI Free VSCode — Change Fix Model** command."
+    "configuration": [
+      {
+        "title": "General",
+        "order": 1,
+        "properties": {
+          "freeAI.custom.providers": {
+            "type": "array",
+            "default": [],
+            "markdownDescription": "Your own OpenAI-compatible endpoints (Ollama, LM Studio, llama.cpp, vLLM, OpenRouter, a gateway). Easiest to manage on the **AI Free VSCode — Open Settings** page. API keys are never stored here — they live in SecretStorage.",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "baseUrl"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "Stable slug. Part of the model ids and of the key entry in SecretStorage; generated from the name when omitted."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Display name in the model picker."
+                },
+                "baseUrl": {
+                  "type": "string",
+                  "description": "Base URL including the version segment, e.g. http://localhost:1234/v1"
+                },
+                "enabled": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "noApiKey": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "The endpoint needs no API key (typical for local servers)."
+                },
+                "models": {
+                  "type": "array",
+                  "description": "Explicit model list. When empty, the models come from GET {baseUrl}/models.",
+                  "items": {
+                    "type": [
+                      "string",
+                      "object"
+                    ],
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "maxInputTokens": {
+                        "type": "number"
+                      },
+                      "maxOutputTokens": {
+                        "type": "number"
+                      },
+                      "toolCalling": {
+                        "type": "boolean"
+                      },
+                      "imageInput": {
+                        "type": "boolean"
+                      },
+                      "thinking": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                },
+                "maxInputTokens": {
+                  "type": "number",
+                  "default": 128000
+                },
+                "maxOutputTokens": {
+                  "type": "number",
+                  "default": 8192
+                },
+                "toolCalling": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "The endpoint supports the OpenAI tools API (needed for agent mode)."
+                },
+                "imageInput": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "thinking": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "The endpoint streams reasoning in `reasoning_content`."
+                },
+                "headers": {
+                  "type": "object",
+                  "description": "Extra request headers, e.g. HTTP-Referer for OpenRouter.",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "order": 1
+          },
+          "freeAI.debug": {
+            "type": "boolean",
+            "default": false,
+            "order": 2,
+            "description": "Verbose DEBUG logs in the 'AI Free VSCode' output channel (auth flow, requests, streaming)."
+          }
+        }
+      },
+      {
+        "title": "Features",
+        "order": 2,
+        "properties": {
+          "freeAI.commit.enabled": {
+            "type": "boolean",
+            "default": true,
+            "order": 1,
+            "description": "Show the ✨ commit message button in the Source Control view."
+          },
+          "freeAI.commit.model": {
+            "type": "string",
+            "default": "auto",
+            "order": 2,
+            "markdownDescription": "Model for commit messages. `auto` = first available."
+          },
+          "freeAI.commit.prompt": {
+            "type": "string",
+            "editPresentation": "multilineText",
+            "default": "Generate a commit message for the git diff below.\nRequirements:\n- Use Conventional Commits format: type(scope): summary (type = feat|fix|docs|style|refactor|perf|test|build|ci|chore).\n- Subject on a single line, imperative mood, max 72 characters.\n- Write the message in English.\n- For significant changes, add a short body after a blank line (a bullet list is allowed).\n- Reply with ONLY the commit message text: no markdown fences, no quotes, no explanations.",
+            "markdownDescription": "Instruction for commit message generation; the git diff is appended to it automatically.",
+            "order": 3
+          },
+          "freeAI.suggestions.enabled": {
+            "type": "boolean",
+            "default": false,
+            "order": 4,
+            "markdownDescription": "On-demand ghost-text suggestions. Never appear while typing — trigger them with `Ctrl/Cmd+Alt+\\`."
+          },
+          "freeAI.suggestions.model": {
+            "type": "string",
+            "default": "auto",
+            "order": 5,
+            "markdownDescription": "Model for inline suggestions. `auto` = first available."
+          },
+          "freeAI.suggestions.maxPrefixChars": {
+            "type": "number",
+            "default": 2000,
+            "minimum": 200,
+            "order": 6,
+            "description": "Characters of code before the cursor sent to the model."
+          },
+          "freeAI.suggestions.maxSuffixChars": {
+            "type": "number",
+            "default": 800,
+            "minimum": 0,
+            "order": 7,
+            "description": "Characters of code after the cursor sent to the model."
+          },
+          "freeAI.fix.enabled": {
+            "type": "boolean",
+            "default": true,
+            "order": 8,
+            "description": "Show 'Fix with AI Free' in the Quick Fix lightbulb (⌘./Ctrl+.) on errors and warnings."
+          },
+          "freeAI.fix.model": {
+            "type": "string",
+            "default": "auto",
+            "order": 9,
+            "markdownDescription": "Model for fixing problems. `auto` = first available."
+          }
+        }
+      },
+      {
+        "title": "Sign-in",
+        "order": 3,
+        "properties": {
+          "freeAI.qwen.browserMode": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "headed",
+              "headless"
+            ],
+            "enumDescriptions": [
+              "Try a hidden headless browser first, and automatically fall back to a minimized visible window only if the Qwen anti-bot blocks it (recommended)",
+              "Always use a real (minimized) browser window — most reliable against the anti-bot, but a window is created",
+              "Always headless with no window and no fallback — no window ever, but the anti-bot may block requests"
+            ],
+            "default": "auto",
+            "markdownDescription": "How the Qwen anti-bot (WAF) fallback browser runs. Changing this needs a window reload.",
+            "order": 1
+          },
+          "freeAI.mimo.path": {
+            "type": "string",
+            "default": "",
+            "order": 2,
+            "markdownDescription": "Path to the MiMo Code CLI (`mimo`). Empty = auto-detect in `~/.mimocode/bin` and `PATH`."
+          },
+          "freeAI.playwright.timeout": {
+            "type": "number",
+            "default": 120000,
+            "order": 3,
+            "description": "Browser sign-in timeout, in milliseconds."
+          }
         }
       }
-    },
+    ],
     "keybindings": [
       {
         "command": "free-ai-vscode.triggerInlineSuggestion",

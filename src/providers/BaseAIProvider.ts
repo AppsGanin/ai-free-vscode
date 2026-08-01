@@ -12,10 +12,22 @@ export abstract class BaseAIProvider implements vscode.Disposable {
   abstract readonly id: string;
   abstract readonly displayName: string;
 
+  /**
+   * The backend speaks the OpenAI tools API. Such providers get tool calls and
+   * results structured instead of inlined into the transcript; the web
+   * backends, which have no tool protocol, leave this off.
+   */
+  readonly nativeToolCalls: boolean = false;
+
   protected readonly _onDidAuthChange = new vscode.EventEmitter<void>();
   readonly onDidAuthChange: vscode.Event<void> = this._onDidAuthChange.event;
 
   abstract getModels(): AIModelInfo[];
+
+  /** Same, resolved per model — composite providers look up the sub-provider. */
+  supportsNativeToolCalls(_modelId: string): boolean {
+    return this.nativeToolCalls;
+  }
 
   /** Models usable right now. Composite providers filter by sub-provider. */
   async getAvailableModels(

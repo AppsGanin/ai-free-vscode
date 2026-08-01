@@ -37,6 +37,25 @@ export interface AIModelInfo {
 export interface AIMessage {
   role: "user" | "assistant" | "system";
   content: string | AIMessageContentPart[];
+  /**
+   * Tool calls the assistant made in this turn. Only filled in native mode
+   * (see `vsCodeMessageToAI`); web providers read `content` and ignore it.
+   */
+  toolCalls?: AIToolCall[];
+  /** Results this turn carries back for earlier calls. Native mode only. */
+  toolResults?: AIToolResult[];
+}
+
+export interface AIToolCall {
+  id: string;
+  name: string;
+  /** JSON-encoded arguments. */
+  arguments: string;
+}
+
+export interface AIToolResult {
+  callId: string;
+  content: string;
 }
 
 export type AIMessageContentPart =
@@ -127,10 +146,26 @@ export class WafChallengeError extends Error {
 
 // ─── VS Code message conversion ─────────────────────────────────────────────
 
+export interface MessageConversionOptions {
+  /**
+   * How tool calls and tool results are carried.
+   *
+   * `false` (default) inlines them into the text — the web backends have no
+   * tool protocol of their own and only ever see a flat transcript.
+   * `true` keeps them structured in `toolCalls` / `toolResults`, for backends
+   * that speak the OpenAI tools API natively.
+   */
+  nativeTools?: boolean;
+}
+
 /** Converts a VS Code chat message into our provider-neutral shape. */
 export function vsCodeMessageToAI(
   msg: vscode.LanguageModelChatRequestMessage,
+  opts: MessageConversionOptions = {},
 ): AIMessage {
+  const native = opts.nativeTools === true;
+  const toolCalls: AIToolCall[] = [];
+  const toolResults: AIToolResult[] = [];
   // The provider API only defines user/assistant. Anything else is kept as
   // assistant rather than promoted to system, to avoid bloating the prompt.
   const role: AIMessage["role"] =
@@ -169,22 +204,33 @@ export function vsCodeMessageToAI(
     }
 
     if (part instanceof vscode.LanguageModelToolCallPart) {
-      appendText(
-        "```tool_call\n" +
-          JSON.stringify(
-            { name: part.name, arguments: part.input ?? {} },
-            null,
-            2,
-          ) +
-          "\n```",
-      );
+      if (native) {
+        toolCalls.push({
+          id: part.callId,
+          name: part.name,
+          arguments: stringify(part.input ?? {}),
+        });
+      } else {
+        appendText(
+          "```tool_call\n" +
+            JSON.stringify(
+              { name: part.name, arguments: part.input ?? {} },
+              null,
+              2,
+            ) +
+            "\n```",
+        );
+      }
       continue;
     }
 
     if (part instanceof vscode.LanguageModelToolResultPart) {
-      appendText(
-        `[Tool result id=${part.callId}]\n${concatToolResultContent(part.content ?? [])}`,
-      );
+      const content = concatToolResultContent(part.content ?? []);
+      if (native) {
+        toolResults.push({ callId: part.callId, content });
+      } else {
+        appendText(`[Tool result id=${part.callId}]\n${content}`);
+      }
       continue;
     }
 
@@ -208,17 +254,23 @@ export function vsCodeMessageToAI(
     }
   }
 
+  const structured = {
+    ...(toolCalls.length > 0 ? { toolCalls } : {}),
+    ...(toolResults.length > 0 ? { toolResults } : {}),
+  };
+
   if (imageSources.length === 0) {
     return {
       role,
       content: parts.map((p) => (p.type === "text" ? p.text : "")).join(""),
+      ...structured,
     };
   }
 
   log(
     `[types] image parts parsed role=${role} count=${imageSources.length} sources=${imageSources.slice(0, 4).join(", ")}`,
   );
-  return { role, content: parts };
+  return { role, content: parts, ...structured };
 }
 
 function describeImageSource(url: string): string {

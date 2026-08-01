@@ -5,12 +5,20 @@ import { UnifiedProvider } from "./providers/UnifiedProvider";
 import { DeepSeekProvider } from "./providers/deepseek/DeepSeekProvider";
 import { KimiProvider } from "./providers/kimi/KimiProvider";
 import { MimoProvider } from "./providers/mimo/MimoProvider";
+import type { OpenAICompatProvider } from "./providers/openai/OpenAICompatProvider";
+import { affectsCustomProviders } from "./providers/openai/customConfig";
+import {
+  createCustomProviders,
+  createModelCache,
+  warmUpModels,
+} from "./providers/openai/customProviders";
 import { ProviderKey, enabledProviders } from "./providers/providerConfig";
 import { QwenProvider } from "./providers/qwen/QwenProvider";
 import { registerCommitMessageCommands } from "./vscode/CommitMessageGenerator";
 import { registerFixProblem } from "./vscode/FixProblemProvider";
 import { registerInlineCompletions } from "./vscode/InlineCompletionProvider";
 import { setFeatureBackend } from "./vscode/ModelPicker";
+import { registerSettingsPanel } from "./vscode/SettingsPanel";
 import { VSCodeLMAdapter } from "./vscode/VSCodeLMAdapter";
 
 // Which sub-providers end up in the build is decided by esbuild
@@ -46,7 +54,14 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   setFeatureBackend(provider, context.secrets);
 
+  const customProviders = registerCustomProviders(context, provider);
+
   registerAccountCommands(context, provider);
+  registerSettingsPanel(context, {
+    provider,
+    secrets: context.secrets,
+    customProviders,
+  });
   registerCommitMessageCommands(context);
   registerInlineCompletions(context);
   registerFixProblem(context);
@@ -58,6 +73,34 @@ export function deactivate(): void {
   // Cleanup runs through context.subscriptions.
 }
 
+/**
+ * User-defined OpenAI-compatible endpoints. They live in settings rather than
+ * in the build, so the set is rebuilt whenever that setting changes; the
+ * accessor hands the current instances to the settings page.
+ */
+function registerCustomProviders(
+  context: vscode.ExtensionContext,
+  provider: UnifiedProvider,
+): () => OpenAICompatProvider[] {
+  const cache = createModelCache(context.globalState);
+  let current = createCustomProviders(cache);
+
+  provider.setCustomProviders(current);
+  warmUpModels(current, context.secrets);
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (!affectsCustomProviders(event)) return;
+      current = createCustomProviders(cache);
+      // Replaces and disposes the previous set, then refreshes the model list.
+      provider.setCustomProviders(current);
+      warmUpModels(current, context.secrets);
+    }),
+  );
+
+  return () => current;
+}
+
 function registerAccountCommands(
   context: vscode.ExtensionContext,
   provider: UnifiedProvider,
@@ -66,7 +109,9 @@ function registerAccountCommands(
   const secrets = context.secrets;
 
   context.subscriptions.push(
-    vscode.commands.registerCommand(`${id}.login`, () =>
+    // The optional id comes from the settings page, which already knows which
+    // provider the user clicked; without it the provider asks.
+    vscode.commands.registerCommand(`${id}.login`, (providerId?: string) =>
       vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
@@ -75,7 +120,7 @@ function registerAccountCommands(
         },
         async () => {
           try {
-            await provider.login(secrets);
+            await provider.login(secrets, providerId);
             log(`[${id}] login success`);
             vscode.window.showInformationMessage(
               `${displayName}: signed in successfully!`,
@@ -91,17 +136,20 @@ function registerAccountCommands(
       ),
     ),
 
-    vscode.commands.registerCommand(`${id}.logout`, async () => {
-      const confirm = await vscode.window.showWarningMessage(
-        `Sign out of ${displayName}? Its models will become unavailable.`,
-        { modal: true },
-        "Sign Out",
-      );
-      if (confirm !== "Sign Out") return;
-      await provider.logout(secrets);
-      log(`[${id}] logged out`);
-      vscode.window.showInformationMessage(`${displayName}: signed out.`);
-    }),
+    vscode.commands.registerCommand(
+      `${id}.logout`,
+      async (providerId?: string) => {
+        const confirm = await vscode.window.showWarningMessage(
+          `Sign out of ${displayName}? Its models will become unavailable.`,
+          { modal: true },
+          "Sign Out",
+        );
+        if (confirm !== "Sign Out") return;
+        await provider.logout(secrets, providerId);
+        log(`[${id}] logged out`);
+        vscode.window.showInformationMessage(`${displayName}: signed out.`);
+      },
+    ),
 
     // Per-sub-provider breakdown: a single "signed in ✓" would hide which of
     // them still needs a login.
@@ -116,14 +164,17 @@ function registerAccountCommands(
             .join("\n"),
         },
         ...(states.some((s) => !s.authenticated) ? ["Sign In"] : []),
+        "Settings",
       );
       if (action === "Sign In") {
         await vscode.commands.executeCommand(`${id}.login`);
+      } else if (action === "Settings") {
+        await vscode.commands.executeCommand(`${id}.settings`);
       }
     }),
 
     vscode.commands.registerCommand(`${id}.manage`, () =>
-      vscode.commands.executeCommand(`${id}.status`),
+      vscode.commands.executeCommand(`${id}.settings`),
     ),
   );
 }
@@ -138,9 +189,12 @@ async function promptIfSignedOut(
   const action = await vscode.window.showInformationMessage(
     `${provider.displayName}: click "Sign In" to use the models in Copilot Chat.`,
     "Sign In",
+    "Settings",
     "Later",
   );
   if (action === "Sign In") {
     await vscode.commands.executeCommand(`${provider.id}.login`);
+  } else if (action === "Settings") {
+    await vscode.commands.executeCommand(`${provider.id}.settings`);
   }
 }

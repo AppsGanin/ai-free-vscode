@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { log } from "../logger";
 import { BaseAIProvider } from "./BaseAIProvider";
 import type { AIModelInfo, AIRequestParams, AIStreamChunk } from "./types";
 
@@ -6,6 +7,8 @@ export interface ProviderAuthState {
   id: string;
   name: string;
   authenticated: boolean;
+  /** User-defined OpenAI-compatible endpoint rather than a built-in backend. */
+  custom: boolean;
 }
 
 /** Fronts every sub-provider as a single VS Code model provider. */
@@ -13,23 +16,49 @@ export class UnifiedProvider extends BaseAIProvider {
   readonly id = "free-ai-vscode";
   readonly displayName = "AI Free VSCode";
 
-  private readonly modelToProvider = new Map<string, BaseAIProvider>();
-  private readonly authDisposables: vscode.Disposable[] = [];
+  /** Built at build time; never changes while the extension runs. */
+  private readonly builtIn: BaseAIProvider[];
+  /** Rebuilt from settings whenever the user edits their own endpoints. */
+  private custom: BaseAIProvider[] = [];
 
-  constructor(private readonly providers: BaseAIProvider[]) {
+  /** Invalidated on every provider-set change; rebuilt on first use. */
+  private modelIndex?: Map<string, BaseAIProvider>;
+  private readonly authDisposables = new Map<
+    BaseAIProvider,
+    vscode.Disposable
+  >();
+
+  constructor(providers: BaseAIProvider[]) {
     super();
+    this.builtIn = providers;
+    for (const provider of providers) this.watchAuth(provider);
+  }
 
-    for (const provider of providers) {
-      for (const model of provider.getModels()) {
-        if (this.modelToProvider.has(model.id)) {
-          throw new Error(`Model id collision: "${model.id}"`);
-        }
-        this.modelToProvider.set(model.id, provider);
-      }
-      this.authDisposables.push(
-        provider.onDidAuthChange(() => this._onDidAuthChange.fire()),
-      );
+  /**
+   * Replaces the user-defined providers. The old ones are disposed, so a
+   * removed endpoint stops answering immediately, and the model list is
+   * refreshed through onDidAuthChange.
+   */
+  setCustomProviders(providers: BaseAIProvider[]): void {
+    for (const provider of this.custom) {
+      this.authDisposables.get(provider)?.dispose();
+      this.authDisposables.delete(provider);
+      provider.dispose();
     }
+
+    this.custom = providers;
+    for (const provider of providers) this.watchAuth(provider);
+
+    this.modelIndex = undefined;
+    log(
+      `[unified] custom providers: ${providers.map((p) => p.displayName).join(", ") || "(none)"}`,
+    );
+    this._onDidAuthChange.fire();
+  }
+
+  /** Built-in providers first, then the user's own. */
+  private get providers(): BaseAIProvider[] {
+    return [...this.builtIn, ...this.custom];
   }
 
   getModels(): AIModelInfo[] {
@@ -60,9 +89,15 @@ export class UnifiedProvider extends BaseAIProvider {
         id: provider.id,
         name: providerTag(provider),
         authenticated: await provider.isAuthenticated(secrets),
+        custom: this.custom.includes(provider),
       });
     }
     return states;
+  }
+
+  /** The backend behind a model speaks the OpenAI tools API natively. */
+  override supportsNativeToolCalls(modelId: string): boolean {
+    return this.providerForModel(modelId)?.nativeToolCalls === true;
   }
 
   async isAuthenticated(secrets: vscode.SecretStorage): Promise<boolean> {
@@ -72,19 +107,25 @@ export class UnifiedProvider extends BaseAIProvider {
     return false;
   }
 
-  async login(secrets: vscode.SecretStorage): Promise<void> {
-    await this.pickAndRun("Sign In", (p) => p.login(secrets));
+  async login(
+    secrets: vscode.SecretStorage,
+    providerId?: string,
+  ): Promise<void> {
+    await this.pickAndRun("Sign In", providerId, (p) => p.login(secrets));
   }
 
-  async logout(secrets: vscode.SecretStorage): Promise<void> {
-    await this.pickAndRun("Sign Out", (p) => p.logout(secrets));
+  async logout(
+    secrets: vscode.SecretStorage,
+    providerId?: string,
+  ): Promise<void> {
+    await this.pickAndRun("Sign Out", providerId, (p) => p.logout(secrets));
   }
 
   sendMessageStream(
     params: AIRequestParams,
     secrets: vscode.SecretStorage,
   ): AsyncIterable<AIStreamChunk> {
-    const provider = this.modelToProvider.get(params.model);
+    const provider = this.providerForModel(params.model);
     if (!provider) {
       throw new Error(`Model is not registered: ${params.model}`);
     }
@@ -92,34 +133,77 @@ export class UnifiedProvider extends BaseAIProvider {
   }
 
   override dispose(): void {
-    for (const d of this.authDisposables) d.dispose();
-    this.authDisposables.length = 0;
+    for (const d of this.authDisposables.values()) d.dispose();
+    this.authDisposables.clear();
     for (const provider of this.providers) provider.dispose();
+    this.custom = [];
     super.dispose();
+  }
+
+  private watchAuth(provider: BaseAIProvider): void {
+    this.authDisposables.set(
+      provider,
+      provider.onDidAuthChange(() => {
+        // A custom provider can gain or lose models on sign-in (its list comes
+        // from the endpoint), so the index cannot be cached across that.
+        this.modelIndex = undefined;
+        this._onDidAuthChange.fire();
+      }),
+    );
+  }
+
+  private providerForModel(modelId: string): BaseAIProvider | undefined {
+    if (!this.modelIndex) {
+      this.modelIndex = new Map();
+      for (const provider of this.providers) {
+        for (const model of provider.getModels()) {
+          const owner = this.modelIndex.get(model.id);
+          if (owner) {
+            // Custom endpoints are namespaced, so this means two backends
+            // really do claim the same id: the first one keeps it.
+            log(
+              `[unified] model id collision "${model.id}": kept ${owner.id}, ignored ${provider.id}`,
+            );
+            continue;
+          }
+          this.modelIndex.set(model.id, provider);
+        }
+      }
+    }
+    return this.modelIndex.get(modelId);
   }
 
   private async pickAndRun(
     action: string,
+    providerId: string | undefined,
     run: (provider: BaseAIProvider) => Promise<void>,
   ): Promise<void> {
-    const selected = await vscode.window.showQuickPick(
-      this.providers.map((provider) => ({
-        label: provider.displayName,
-        description: provider.id,
-        value: provider.id,
-      })),
-      {
-        title: `Select a provider to ${action.toLowerCase()}`,
-        placeHolder: action,
-        ignoreFocusOut: true,
-      },
-    );
-    if (!selected) return;
+    let target = providerId
+      ? this.providers.find((p) => p.id === providerId)
+      : undefined;
 
-    const provider = this.providers.find((p) => p.id === selected.value);
-    if (!provider) throw new Error(`Provider not found: ${selected.value}`);
+    if (!target) {
+      if (providerId) throw new Error(`Provider not found: ${providerId}`);
 
-    await run(provider);
+      const selected = await vscode.window.showQuickPick(
+        this.providers.map((provider) => ({
+          label: provider.displayName,
+          description: provider.id,
+          value: provider.id,
+        })),
+        {
+          title: `Select a provider to ${action.toLowerCase()}`,
+          placeHolder: action,
+          ignoreFocusOut: true,
+        },
+      );
+      if (!selected) return;
+
+      target = this.providers.find((p) => p.id === selected.value);
+      if (!target) throw new Error(`Provider not found: ${selected.value}`);
+    }
+
+    await run(target);
     this._onDidAuthChange.fire();
   }
 

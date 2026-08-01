@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src {{cspSource}} data:; style-src {{cspSource}}; script-src 'nonce-{{nonce}}';"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="{{styleUri}}" />
+    <title>AI Free VSCode</title>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>AI Free VSCode</h1>
+        <p class="subtitle">
+          Providers, your own OpenAI-compatible endpoints, and every extension
+          setting in one place.
+        </p>
+      </header>
+
+      <section>
+        <h2>Built-in providers</h2>
+        <p class="hint">
+          Free web accounts. Signing in opens a browser window; the session is
+          stored in SecretStorage.
+        </p>
+        <div id="providers" class="rows"></div>
+        <p id="providers-empty" class="empty" hidden>
+          No providers in this build.
+        </p>
+      </section>
+
+      <section>
+        <h2>Your OpenAI-compatible endpoints</h2>
+        <p class="hint">
+          Anything that serves <code>POST /chat/completions</code>: Ollama, LM
+          Studio, llama.cpp, vLLM, OpenRouter, a corporate gateway. Tool calls
+          go over the native tools API. Keys are kept in SecretStorage, never in
+          <code>settings.json</code>.
+        </p>
+
+        <div id="endpoints" class="rows"></div>
+        <p id="endpoints-empty" class="empty" hidden>Nothing added yet.</p>
+
+        <div id="endpoint-actions" class="actions">
+          <button id="add-endpoint" type="button">+ Add endpoint</button>
+          <button id="open-json" type="button" class="ghost">
+            Edit as JSON
+          </button>
+          <span id="list-status" class="status" role="status"></span>
+        </div>
+
+        <form id="endpoint-form" class="card" hidden>
+          <h3 id="form-title">New endpoint</h3>
+          <input type="hidden" id="endpoint-id" />
+
+          <div class="grid">
+            <p class="field">
+              <label for="endpoint-name">Name</label>
+              <input
+                type="text"
+                id="endpoint-name"
+                placeholder="LM Studio"
+                required
+              />
+            </p>
+            <p class="field">
+              <label for="endpoint-url">Base URL</label>
+              <input
+                type="text"
+                id="endpoint-url"
+                placeholder="http://localhost:1234/v1"
+                required
+              />
+            </p>
+          </div>
+
+          <p class="field">
+            <label for="endpoint-key">API key</label>
+            <input type="password" id="endpoint-key" placeholder="sk-..." />
+            <span class="hint" id="key-hint">
+              Stored in SecretStorage, separately from settings.
+            </span>
+          </p>
+
+          <label class="check">
+            <input type="checkbox" id="endpoint-no-key" />
+            This endpoint needs no API key (local server)
+          </label>
+
+          <label class="check" id="clear-key-row" hidden>
+            <input type="checkbox" id="endpoint-clear-key" />
+            Remove the stored key
+          </label>
+
+          <p class="field">
+            <label for="endpoint-models">Models (one per line)</label>
+            <textarea
+              id="endpoint-models"
+              rows="4"
+              placeholder="Leave empty to load them from GET /models"
+            ></textarea>
+            <span class="hint">
+              Empty = the list is fetched from the endpoint and refreshed
+              automatically. Fill it in to pin an exact set.
+            </span>
+          </p>
+
+          <details>
+            <summary>Advanced</summary>
+            <div class="details-body">
+              <div class="grid">
+                <p class="field">
+                  <label for="endpoint-max-input">Max input tokens</label>
+                  <input type="number" id="endpoint-max-input" min="1" />
+                </p>
+                <p class="field">
+                  <label for="endpoint-max-output">Max output tokens</label>
+                  <input type="number" id="endpoint-max-output" min="1" />
+                </p>
+              </div>
+
+              <label class="check">
+                <input type="checkbox" id="endpoint-tools" />
+                Supports tool calling (agent mode)
+              </label>
+              <label class="check">
+                <input type="checkbox" id="endpoint-images" />
+                Supports image input
+              </label>
+              <label class="check">
+                <input type="checkbox" id="endpoint-thinking" />
+                Streams reasoning (<code>reasoning_content</code>)
+              </label>
+              <label class="check">
+                <input type="checkbox" id="endpoint-enabled" />
+                Enabled
+              </label>
+
+              <p class="field">
+                <label for="endpoint-headers">Extra headers (JSON)</label>
+                <textarea
+                  id="endpoint-headers"
+                  rows="3"
+                  placeholder='{ "HTTP-Referer": "https://example.com" }'
+                ></textarea>
+              </p>
+            </div>
+          </details>
+
+          <div class="actions">
+            <button type="submit" id="save-endpoint">Save</button>
+            <button type="button" id="test-endpoint" class="secondary">
+              Test &amp; load models
+            </button>
+            <button type="button" id="cancel-endpoint" class="ghost">
+              Cancel
+            </button>
+            <span id="form-status" class="status" role="status"></span>
+          </div>
+        </form>
+      </section>
+
+      <section>
+        <h2>Features</h2>
+        <p class="hint">
+          Which model each helper uses. <code>auto</code> picks the first
+          available one.
+        </p>
+
+        <label class="check">
+          <input type="checkbox" data-setting="freeAI.commit.enabled" />
+          Commit message button in Source Control
+        </label>
+        <p class="field">
+          <label for="commit-model">Commit message model</label>
+          <select
+            id="commit-model"
+            data-setting="freeAI.commit.model"
+            data-capability="commit"
+          ></select>
+        </p>
+        <p class="field">
+          <label for="commit-prompt">Commit prompt</label>
+          <textarea
+            id="commit-prompt"
+            rows="6"
+            data-setting="freeAI.commit.prompt"
+          ></textarea>
+        </p>
+
+        <label class="check">
+          <input type="checkbox" data-setting="freeAI.suggestions.enabled" />
+          Inline code suggestions (<kbd>Ctrl/Cmd+Alt+\</kbd>)
+        </label>
+        <p class="field">
+          <label for="suggestions-model">Suggestions model</label>
+          <select
+            id="suggestions-model"
+            data-setting="freeAI.suggestions.model"
+            data-capability="suggestions"
+          ></select>
+        </p>
+        <div class="grid">
+          <p class="field">
+            <label for="prefix-chars">Prefix characters</label>
+            <input
+              type="number"
+              id="prefix-chars"
+              min="200"
+              data-setting="freeAI.suggestions.maxPrefixChars"
+            />
+          </p>
+          <p class="field">
+            <label for="suffix-chars">Suffix characters</label>
+            <input
+              type="number"
+              id="suffix-chars"
+              min="0"
+              data-setting="freeAI.suggestions.maxSuffixChars"
+            />
+          </p>
+        </div>
+
+        <label class="check">
+          <input type="checkbox" data-setting="freeAI.fix.enabled" />
+          "Fix with AI Free" quick fix
+        </label>
+        <p class="field">
+          <label for="fix-model">Fix model</label>
+          <select
+            id="fix-model"
+            data-setting="freeAI.fix.model"
+            data-capability="fix"
+          ></select>
+        </p>
+      </section>
+
+      <section>
+        <h2>Advanced</h2>
+
+        <label class="check">
+          <input type="checkbox" data-setting="freeAI.debug" />
+          Verbose debug logs in the output channel
+        </label>
+
+        <p class="field">
+          <label for="qwen-browser-mode">Qwen sign-in browser mode</label>
+          <select id="qwen-browser-mode" data-setting="freeAI.qwen.browserMode">
+            <option value="auto">
+              auto — headless first, a window only if the anti-bot blocks it
+            </option>
+            <option value="headed">headed — always a minimized window</option>
+            <option value="headless">headless — never a window</option>
+          </select>
+        </p>
+
+        <p class="field">
+          <label for="mimo-path">MiMo CLI path</label>
+          <input
+            type="text"
+            id="mimo-path"
+            placeholder="auto-detected in ~/.mimocode/bin and PATH"
+            data-setting="freeAI.mimo.path"
+          />
+        </p>
+
+        <p class="field">
+          <label for="playwright-timeout">Browser sign-in timeout (ms)</label>
+          <input
+            type="number"
+            id="playwright-timeout"
+            min="1000"
+            data-setting="freeAI.playwright.timeout"
+          />
+        </p>
+      </section>
+    </main>
+
+    <template id="provider-row">
+      <div class="row">
+        <div class="grow">
+          <span class="name"></span>
+          <span class="meta"></span>
+        </div>
+        <span class="badge"></span>
+        <button type="button" class="auth"></button>
+      </div>
+    </template>
+
+    <template id="endpoint-row">
+      <div class="row">
+        <div class="grow">
+          <span class="name"></span>
+          <span class="meta"></span>
+        </div>
+        <span class="badge"></span>
+        <button type="button" class="ghost refresh">Refresh models</button>
+        <button type="button" class="secondary edit">Edit</button>
+        <button type="button" class="danger delete">Delete</button>
+      </div>
+    </template>
+
+    <script nonce="{{nonce}}" src="{{scriptUri}}"></script>
+  </body>
+</html>

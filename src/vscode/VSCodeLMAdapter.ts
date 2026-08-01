@@ -61,11 +61,26 @@ function partToCountableText(part: unknown): string {
 }
 
 function messageChars(message: AIMessage): number {
-  if (typeof message.content === "string") return message.content.length;
-  return message.content.reduce(
-    (sum, part) => sum + (part.type === "text" ? part.text.length : 9),
+  const content =
+    typeof message.content === "string"
+      ? message.content.length
+      : message.content.reduce(
+          (sum, part) => sum + (part.type === "text" ? part.text.length : 9),
+          0,
+        );
+
+  // In native mode the tool traffic lives outside `content`; leaving it out
+  // made the logged prompt size stop growing across an agent loop.
+  const calls = (message.toolCalls ?? []).reduce(
+    (sum, call) => sum + call.name.length + call.arguments.length,
     0,
   );
+  const results = (message.toolResults ?? []).reduce(
+    (sum, result) => sum + result.content.length,
+    0,
+  );
+
+  return content + calls + results;
 }
 
 function safeStringify(value: unknown): string {
@@ -156,7 +171,12 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
     const abortController = new AbortController();
     token.onCancellationRequested(() => abortController.abort());
 
-    const aiMessages = messages.map(vsCodeMessageToAI);
+    // Backends with a real tools API get the calls and results structured;
+    // the web ones need them inlined into the transcript.
+    const nativeTools = this.provider.supportsNativeToolCalls(model.id);
+    const aiMessages = messages.map((message) =>
+      vsCodeMessageToAI(message, { nativeTools }),
+    );
     const tools = options.tools?.map((tool) => ({
       name: tool.name,
       description: tool.description ?? "",
@@ -172,6 +192,10 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
         ? "none"
         : "auto";
     const toolsExpected = toolMode !== "none" && (tools?.length ?? 0) > 0;
+    // Only the prompt-based protocol needs its markers scrubbed out of the
+    // text and recovered from it; a native backend emits calls structurally,
+    // and scrubbing would eat legitimate output instead.
+    const promptToolProtocol = toolsExpected && !nativeTools;
 
     // Callers can force the thinking mode through modelOptions (commits and
     // inline suggestions turn reasoning off).
@@ -259,7 +283,7 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
 
         if (chunk.type === "text") {
           rawTextAll += chunk.content;
-          const safe = sanitizeToolProtocol(chunk.content, toolsExpected);
+          const safe = sanitizeToolProtocol(chunk.content, promptToolProtocol);
           if (!safe) continue;
           textChars += safe.length;
           await text.push(safe);
@@ -314,7 +338,7 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
 
     // Nothing structural arrived, but a call may have leaked into another
     // channel (oversized call past the provider holdback, or thinking+tools).
-    if (toolsExpected && emitted.length === 0) {
+    if (promptToolProtocol && emitted.length === 0) {
       for (const [source, buffer] of [
         ["text", rawTextAll],
         ["thinking", thinkingAll],

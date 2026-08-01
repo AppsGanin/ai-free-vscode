@@ -23,6 +23,8 @@
 - ✅ Generates commit messages from your staged diff
 - ✅ Inline code suggestions (ghost text) on demand
 - ✅ "Fix with AI" Quick Fix on errors/warnings, with a diff preview
+- ✅ Add your own OpenAI-compatible endpoints (Ollama, LM Studio, any gateway)
+- ✅ One settings page for everything: `AI Free VSCode — Open Settings`
 
 Only models from providers you are signed into appear in the picker — no
 dead entries that fail on use.
@@ -92,6 +94,48 @@ Only the free anonymous channel is exposed; the paid `xiaomi/*` models are
 deliberately left out, since they need a MiMo account. The model appears in the
 picker as soon as `mimo models` reports it. If the binary lives outside
 `~/.mimocode/bin` and `PATH`, point **`freeAI.mimo.path`** at it.
+
+### Your own OpenAI-compatible endpoints
+
+Anything that serves `POST {baseUrl}/chat/completions` can be added as a
+provider: Ollama, LM Studio, llama.cpp, vLLM, OpenRouter, a corporate gateway.
+Its models show up in the same picker, next to the free web ones.
+
+Run **`AI Free VSCode — Open Settings`**, then *+ Add endpoint*:
+
+| Field           | Example                    | Notes                                              |
+| --------------- | -------------------------- | -------------------------------------------------- |
+| Name            | `LM Studio`                | Shown in the model picker                          |
+| Base URL        | `http://localhost:1234/v1` | A bare origin gets `/v1` appended automatically     |
+| API key         | `sk-...`                   | Stored in SecretStorage, never in `settings.json`  |
+| Models          | *(empty)*                  | Empty = fetched from `GET {baseUrl}/models`        |
+
+*Test & load models* checks the connection and fills the list; leave the list
+empty to keep it in sync with the endpoint, or pin an exact set by hand (useful
+on OpenRouter, where the catalogue is hundreds of models long).
+
+Unlike the web backends, these speak the OpenAI tools API, so tool calls and
+tool results travel structurally — agent mode works as it does with a paid
+provider, as far as the model behind the endpoint supports it.
+
+Everything except the key is kept in `freeAI.custom.providers`, so it syncs with
+your settings and can be edited as JSON if you prefer:
+
+```jsonc
+"freeAI.custom.providers": [
+  {
+    "name": "Ollama",
+    "baseUrl": "http://localhost:11434/v1",
+    "noApiKey": true          // local server, no credentials
+  },
+  {
+    "name": "OpenRouter",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "models": ["qwen/qwen3-coder:free", "deepseek/deepseek-r1:free"],
+    "thinking": true          // streams reasoning_content
+  }
+]
+```
 
 ## How it works
 
@@ -184,6 +228,10 @@ down after 10 minutes of inactivity, and each request uses a throwaway session.
    install it, then run `AI Free VSCode — Status`.
 5. Open Copilot Chat and select a model.
 
+Prefer a UI? Run `AI Free VSCode — Open Settings` instead: it has sign-in for
+every provider, your own OpenAI-compatible endpoints, and all settings on one
+page.
+
 To sign out:
 
 - `AI Free VSCode — Sign Out`
@@ -251,8 +299,12 @@ before changing the file.
 
 ## Configuration
 
+Everything below is also editable on one page: **`AI Free VSCode — Open Settings`**
+(sign-in status, your own endpoints, and every setting).
+
 | Setting                             | Default  | Description                                                    |
 | ----------------------------------- | -------- | -------------------------------------------------------------- |
+| `freeAI.custom.providers`           | `[]`     | Your own OpenAI-compatible endpoints (keys live in SecretStorage) |
 | `freeAI.playwright.timeout`         | `120000` | Browser sign-in timeout in milliseconds                        |
 | `freeAI.qwen.browserMode`           | `auto`   | Qwen anti-bot fallback browser: `auto` / `headed` / `headless` |
 | `freeAI.commit.enabled`             | `true`   | Show the ✨ commit message generation button in Source Control |
