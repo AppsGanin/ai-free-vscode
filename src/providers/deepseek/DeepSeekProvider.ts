@@ -2,11 +2,11 @@ import * as vscode from "vscode";
 import { errToString, log } from "../../logger";
 import { BaseAIProvider } from "../BaseAIProvider";
 import { isAbortError, isNetworkFailure } from "../common/http";
-import { conversationKey } from "../common/messages";
+import { contentToString, conversationKey } from "../common/messages";
 import type { AIModelInfo, AIRequestParams, AIStreamChunk } from "../types";
 import { AuthExpiredError } from "../types";
 import type { DeepSeekAuthState } from "./DeepSeekApiClient";
-import { DeepSeekApiClient } from "./DeepSeekApiClient";
+import { DeepSeekApiClient, MAX_PROMPT_CHARS } from "./DeepSeekApiClient";
 import { DeepSeekAuthManager } from "./DeepSeekAuthManager";
 import { DEEPSEEK_MODELS } from "./DeepSeekModels";
 
@@ -20,6 +20,24 @@ const NETWORK_RETRY_DELAYS_MS = [1000, 3000];
 /** Where the Expert model falls back to when the upstream is overloaded. */
 const DEFAULT_MODEL_ID = "deepseek-default";
 
+/**
+ * How much text one upstream session may accumulate before it is abandoned.
+ *
+ * The whole conversation is resent as a single prompt on every turn, so a
+ * session that chains its messages holds that history once per turn and runs
+ * into DeepSeek's "Length limit reached. Please start a new chat." after a few
+ * of them. Rolling over to a new session beforehand keeps that failure out of
+ * the chat; nothing is lost, because the prompt carries the history anyway.
+ */
+const SESSION_CONTEXT_BUDGET_CHARS = MAX_PROMPT_CHARS;
+
+/**
+ * Prompt budgets for the retries after the upstream reported a length limit.
+ * The window depends on the account and on the language of the conversation,
+ * so it is found by halving rather than assumed.
+ */
+const SHRUNK_PROMPT_CHARS = [140000, 70000];
+
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** One retry of the request: where to send it and with which model. */
@@ -27,6 +45,7 @@ interface Attempt {
   sessionId: string;
   parentId?: number;
   model?: string;
+  maxPromptChars?: number;
 }
 
 export class DeepSeekProvider extends BaseAIProvider {
@@ -37,6 +56,10 @@ export class DeepSeekProvider extends BaseAIProvider {
   private readonly apiClient = new DeepSeekApiClient();
   private readonly sessionIdByConversation = new Map<string, string>();
   private readonly parentMessageIdByConversation = new Map<string, number>();
+  /** Text already pushed into the upstream session, prompts plus answers. */
+  private readonly sessionUsageByConversation = new Map<string, number>();
+  /** Prompt budget a length-limited conversation was last accepted at. */
+  private readonly promptCapByConversation = new Map<string, number>();
 
   /**
    * DeepSeek allows one generation per ACCOUNT, not per session. Copilot Chat
@@ -106,6 +129,8 @@ export class DeepSeekProvider extends BaseAIProvider {
     await this.authManager.logout(secrets);
     this.sessionIdByConversation.clear();
     this.parentMessageIdByConversation.clear();
+    this.sessionUsageByConversation.clear();
+    this.promptCapByConversation.clear();
     this._onDidAuthChange.fire();
   }
 
@@ -135,10 +160,21 @@ export class DeepSeekProvider extends BaseAIProvider {
     const key = conversationKey(params);
     let sessionId = params.chatId ?? this.sessionIdByConversation.get(key);
     let parentMessageId = this.parentMessageIdByConversation.get(key);
+    const promptCap = this.promptCapByConversation.get(key);
+    const promptChars = estimatePromptChars(params, promptCap);
+
+    const used = this.sessionUsageByConversation.get(key) ?? 0;
+    if (sessionId && used + promptChars > SESSION_CONTEXT_BUDGET_CHARS) {
+      log(
+        `[${this.id}] session context budget reached (${used}+${promptChars} chars) — rolling over`,
+      );
+      sessionId = undefined;
+    }
 
     if (!sessionId) {
       sessionId = await this.createSession(auth, params.abortSignal);
       this.sessionIdByConversation.set(key, sessionId);
+      this.sessionUsageByConversation.set(key, 0);
       parentMessageId = undefined;
       this.parentMessageIdByConversation.delete(key);
       log(
@@ -156,6 +192,7 @@ export class DeepSeekProvider extends BaseAIProvider {
     ): AsyncIterable<AIStreamChunk> {
       let lastMessageId = attempt.parentId;
       let produced = false;
+      let answerChars = 0;
 
       try {
         const stream = this.apiClient.sendMessageStream(
@@ -173,6 +210,7 @@ export class DeepSeekProvider extends BaseAIProvider {
             onMessageId: (messageId) => {
               lastMessageId = messageId;
             },
+            maxPromptChars: attempt.maxPromptChars ?? promptCap,
           },
         );
 
@@ -180,6 +218,9 @@ export class DeepSeekProvider extends BaseAIProvider {
           if (chunk.type === "text" || chunk.type === "tool_call") {
             produced = true;
             streamedToUser = true;
+          }
+          if (chunk.type === "text" || chunk.type === "thinking") {
+            answerChars += chunk.content.length;
           }
           yield chunk;
         }
@@ -191,6 +232,20 @@ export class DeepSeekProvider extends BaseAIProvider {
           this.parentMessageIdByConversation.set(key, lastMessageId);
         } else {
           this.parentMessageIdByConversation.delete(key);
+        }
+
+        // The turn now lives in the upstream session and counts against its
+        // window, whether or not this conversation chains onto it.
+        this.sessionUsageByConversation.set(
+          key,
+          (this.sessionUsageByConversation.get(key) ?? 0) +
+            estimatePromptChars(params, attempt.maxPromptChars ?? promptCap) +
+            answerChars,
+        );
+        // A budget that got through is kept for the rest of the conversation,
+        // so the length limit is not rediscovered on every turn.
+        if (attempt.maxPromptChars !== undefined) {
+          this.promptCapByConversation.set(key, attempt.maxPromptChars);
         }
       } catch (err) {
         if (
@@ -244,9 +299,25 @@ export class DeepSeekProvider extends BaseAIProvider {
       log(`[${this.id}] retrying in a fresh session`);
       const freshSessionId = await this.createSession(auth, params.abortSignal);
       this.sessionIdByConversation.set(key, freshSessionId);
+      this.sessionUsageByConversation.set(key, 0);
       this.parentMessageIdByConversation.delete(key);
       return { sessionId: freshSessionId };
     };
+
+    /**
+     * Even alone in an empty session the prompt was too long — cut it down.
+     * Runs after `freshSession`, so it picks up the session that one created.
+     */
+    const shrinkPrompt =
+      (maxPromptChars: number) => async (): Promise<Attempt> => {
+        log(
+          `[${this.id}] prompt over the length limit — trimming to ${maxPromptChars} chars`,
+        );
+        return {
+          sessionId: this.sessionIdByConversation.get(key) ?? sessionId,
+          maxPromptChars,
+        };
+      };
 
     let lastError: unknown;
     try {
@@ -269,6 +340,17 @@ export class DeepSeekProvider extends BaseAIProvider {
       }
       if (isExpertBusy(error)) return [useDefaultModel];
       if (isSessionBusy(error)) return [freshSession];
+      // The session is gone — deleted from the DeepSeek UI, or dropped.
+      if (isUnknownSession(error)) return [freshSession];
+      // The session is full. Dropping the turns it accumulated is enough
+      // whenever it held any; past that the prompt itself is over the window
+      // and has to be narrowed down.
+      if (isContextLimit(error)) {
+        const shrinks = SHRUNK_PROMPT_CHARS.map((chars) => shrinkPrompt(chars));
+        return this.sessionUsageByConversation.get(key)
+          ? [freshSession, ...shrinks]
+          : shrinks;
+      }
       return [withoutParent, freshSession];
     };
 
@@ -323,6 +405,32 @@ function isStaleParent(error: unknown): boolean {
 }
 
 /**
+ * The session id is not one the account has: deleted from the DeepSeek UI, or
+ * dropped upstream. The cached id is dead for good, only a new session helps.
+ */
+function isUnknownSession(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /invalid chat session|chat session (?:not found|does not exist)|biz error\s*1\b/i.test(
+      error.message,
+    )
+  );
+}
+
+/**
+ * The session ran out of room — "Length limit reached. Please start a new
+ * chat.", which is exactly what the recovery does on the user's behalf.
+ */
+function isContextLimit(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /context_length_exceeded|length limit reached|start a new chat/i.test(
+      error.message,
+    )
+  );
+}
+
+/**
  * The Expert model itself is overloaded. The upstream suggests its default
  * ("Instant") model, which is exactly what the fallback does.
  */
@@ -338,6 +446,18 @@ function isRecoverable(error: unknown): boolean {
     isStaleParent(error) ||
     isParallelLimit(error) ||
     isExpertBusy(error) ||
+    isUnknownSession(error) ||
+    isContextLimit(error) ||
     isNetworkFailure(error)
   );
+}
+
+/** Roughly what `buildRolePrompt` will send for this request. */
+function estimatePromptChars(params: AIRequestParams, cap?: number): number {
+  let total = 0;
+  for (const message of params.messages) {
+    if (message.role === "system") continue;
+    total += contentToString(message.content).length;
+  }
+  return Math.min(total, cap ?? MAX_PROMPT_CHARS);
 }

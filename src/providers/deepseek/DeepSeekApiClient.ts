@@ -28,8 +28,12 @@ const STREAM_TIMEOUT_MS = 30000;
  * Roughly the model's 128k input window at ~3 chars per token. Agent turns
  * carry whole files in their tool results and blow past it easily; the oldest
  * turns are dropped rather than letting the upstream answer with nothing.
+ *
+ * The real window varies with the account and the language (Cyrillic costs
+ * about twice as many tokens per character as English), so the provider may
+ * lower this per request once the upstream has complained about the length.
  */
-const MAX_PROMPT_CHARS = 300000;
+export const MAX_PROMPT_CHARS = 300000;
 
 export interface DeepSeekAuthState {
   token?: string;
@@ -101,7 +105,11 @@ export class DeepSeekApiClient {
   async *sendMessageStream(
     params: AIRequestParams,
     auth: DeepSeekAuthState,
-    options?: { onMessageId?: (messageId: number) => void },
+    options?: {
+      onMessageId?: (messageId: number) => void;
+      /** Tighter prompt budget for a retry after a length-limit failure. */
+      maxPromptChars?: number;
+    },
   ): AsyncIterable<AIStreamChunk> {
     const sessionId = params.chatId;
     if (!sessionId) {
@@ -127,7 +135,7 @@ export class DeepSeekApiClient {
       system: hasTools
         ? buildToolsSystemPrompt(params.tools ?? [])
         : LANGUAGE_GUARD,
-      maxChars: MAX_PROMPT_CHARS,
+      maxChars: options?.maxPromptChars ?? MAX_PROMPT_CHARS,
     });
     const parentMessageId = Number(params.parentId);
 
