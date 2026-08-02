@@ -18,6 +18,12 @@ const SESSION_TITLE = "AI Free VSCode";
 /** Age at which a session counts as abandoned (never touch a sibling window's). */
 const STALE_SESSION_AGE_MS = 10 * 60 * 1000;
 const MAX_IMAGES = 8;
+/**
+ * Just under the 1M window MiMo advertises — a guard rail rather than a budget,
+ * since the routed backends are far below it. In tokens, so a Cyrillic chat
+ * gets the character allowance it actually costs.
+ */
+const MAX_PROMPT_TOKENS = 900000;
 /** The server needs a moment to wind generation down between abort and delete. */
 const ABORT_SETTLE_MS = 1000;
 
@@ -76,6 +82,7 @@ export class MimoApiClient {
     const content = buildFlatTranscript(
       params.messages,
       hasTools ? buildToolsSystemPrompt(params.tools ?? []) : "",
+      { maxTokens: MAX_PROMPT_TOKENS },
     );
     const images = collectImages(params.messages);
     log.info(

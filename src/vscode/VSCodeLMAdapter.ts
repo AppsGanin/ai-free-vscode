@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { type ScopedLogger, createLogger, errToString } from "../logger";
 import type { BaseAIProvider } from "../providers/BaseAIProvider";
+import { estimateTokens } from "../providers/common/messages";
 import {
   looksLikeToolCallStart,
   parseToolCallsFromText,
@@ -27,19 +28,6 @@ const ThinkingPartCtor = (
 ).LanguageModelThinkingPart;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-
-/**
- * Rough but honest token estimate. BPE tokenizers give ~4 chars per token for
- * latin text and far fewer (~1.5) for Cyrillic/CJK, so a plain `length / 4`
- * badly underestimated non-latin context.
- */
-function estimateTokens(text: string): number {
-  let ascii = 0;
-  for (let i = 0; i < text.length; i++) {
-    if (text.charCodeAt(i) < 128) ascii++;
-  }
-  return Math.ceil(ascii / 4 + (text.length - ascii) / 1.5);
-}
 
 /** Text of a VS Code message part, including tool calls/results — all context. */
 function partToCountableText(part: unknown): string {

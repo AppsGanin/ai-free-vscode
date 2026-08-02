@@ -32,7 +32,10 @@ const BX_V = "2.5.36";
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-const MAX_PROMPT_CHARS = 500000;
+// Well inside the model's declared 1M window. Counted in tokens, not
+// characters: the same character count costs about twice the tokens in
+// Cyrillic/CJK, so a flat character cap overruns the window on those chats.
+const MAX_PROMPT_TOKENS = 125000;
 const MAX_SYSTEM_MESSAGE_CHARS = 100000;
 const THINKING_BUDGET_TOKENS = 4096;
 const STREAM_TIMEOUT_MS = 120000;
@@ -453,7 +456,7 @@ export class QwenApiClient {
     hasTools: boolean,
   ): QwenRequestBody {
     const prompt = buildRolePrompt(params.messages, {
-      maxChars: MAX_PROMPT_CHARS,
+      maxTokens: MAX_PROMPT_TOKENS,
     });
     const content = attachImages(params.messages, prompt);
 

@@ -16,6 +16,13 @@ const SCENARIO = "SCENARIO_K2D5";
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const STREAM_TIMEOUT_MS = 120000;
+/**
+ * Conservative share of the model's 131k input window. The whole conversation
+ * is flattened into one turn, so agent loops carrying whole files in their tool
+ * results run past it; the oldest turns are dropped rather than letting the
+ * upstream refuse the request outright.
+ */
+const MAX_PROMPT_TOKENS = 75000;
 /** Connect protocol frame header: 1 flag byte + 4 length bytes. */
 const FRAME_HEADER_BYTES = 5;
 
@@ -58,6 +65,7 @@ export class KimiApiClient {
     const content = buildFlatTranscript(
       params.messages,
       hasTools ? buildToolsSystemPrompt(params.tools ?? []) : "",
+      { maxTokens: MAX_PROMPT_TOKENS },
     );
 
     log.info(

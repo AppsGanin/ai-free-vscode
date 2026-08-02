@@ -25,15 +25,16 @@ const DEEPSEEK_SHA3_WASM =
 
 const STREAM_TIMEOUT_MS = 30000;
 /**
- * Roughly the model's 128k input window at ~3 chars per token. Agent turns
- * carry whole files in their tool results and blow past it easily; the oldest
- * turns are dropped rather than letting the upstream answer with nothing.
+ * Conservative share of the model's 128k input window. Agent turns carry whole
+ * files in their tool results and blow past it easily; the oldest turns are
+ * dropped rather than letting the upstream answer with nothing.
  *
- * The real window varies with the account and the language (Cyrillic costs
- * about twice as many tokens per character as English), so the provider may
- * lower this per request once the upstream has complained about the length.
+ * Counted in tokens, not characters: the character budget is derived per
+ * request from the language of the conversation (`charBudgetForTokens`). The
+ * real window still varies with the account, so the provider may lower this
+ * further once the upstream has complained about the length.
  */
-export const MAX_PROMPT_CHARS = 300000;
+export const MAX_PROMPT_TOKENS = 75000;
 
 export interface DeepSeekAuthState {
   token?: string;
@@ -135,7 +136,8 @@ export class DeepSeekApiClient {
       system: hasTools
         ? buildToolsSystemPrompt(params.tools ?? [])
         : LANGUAGE_GUARD,
-      maxChars: options?.maxPromptChars ?? MAX_PROMPT_CHARS,
+      maxChars: options?.maxPromptChars,
+      maxTokens: MAX_PROMPT_TOKENS,
     });
     const parentMessageId = Number(params.parentId);
 

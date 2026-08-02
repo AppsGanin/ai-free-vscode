@@ -2,11 +2,15 @@ import * as vscode from "vscode";
 import { errToString, log } from "../../logger";
 import { BaseAIProvider } from "../BaseAIProvider";
 import { isAbortError, isNetworkFailure } from "../common/http";
-import { contentToString, conversationKey } from "../common/messages";
+import {
+  charBudgetForTokens,
+  contentToString,
+  conversationKey,
+} from "../common/messages";
 import type { AIModelInfo, AIRequestParams, AIStreamChunk } from "../types";
 import { AuthExpiredError, RateLimitError } from "../types";
 import type { DeepSeekAuthState } from "./DeepSeekApiClient";
-import { DeepSeekApiClient, MAX_PROMPT_CHARS } from "./DeepSeekApiClient";
+import { DeepSeekApiClient, MAX_PROMPT_TOKENS } from "./DeepSeekApiClient";
 import { DeepSeekAuthManager } from "./DeepSeekAuthManager";
 import { DEEPSEEK_MODELS } from "./DeepSeekModels";
 
@@ -38,15 +42,25 @@ const DEFAULT_MODEL_ID = "deepseek-default";
  * into DeepSeek's "Length limit reached. Please start a new chat." after a few
  * of them. Rolling over to a new session beforehand keeps that failure out of
  * the chat; nothing is lost, because the prompt carries the history anyway.
+ *
+ * Expressed in tokens and converted per conversation, for the same reason the
+ * prompt budget is: the same character count is twice the tokens in Russian.
  */
-const SESSION_CONTEXT_BUDGET_CHARS = MAX_PROMPT_CHARS;
+const SESSION_CONTEXT_BUDGET_TOKENS = MAX_PROMPT_TOKENS;
 
 /**
- * Prompt budgets for the retries after the upstream reported a length limit.
- * The window depends on the account and on the language of the conversation,
- * so it is found by halving rather than assumed.
+ * Prompt budgets for the retries after the upstream reported a length limit,
+ * as a share of what it just refused. The window depends on the account and on
+ * the language of the conversation (Cyrillic costs about twice the tokens per
+ * character), so it is found by halving rather than assumed.
+ *
+ * Relative rather than absolute: a fixed ladder above the size that already
+ * failed resends the very same prompt and burns a retry on a certain failure.
  */
-const SHRUNK_PROMPT_CHARS = [140000, 70000];
+const SHRUNK_PROMPT_FRACTIONS = [0.5, 0.25, 0.12];
+
+/** Floor for the ladder — below this a turn carries too little to be useful. */
+const MIN_PROMPT_CHARS = 20000;
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -174,7 +188,11 @@ export class DeepSeekProvider extends BaseAIProvider {
     const promptChars = estimatePromptChars(params, promptCap);
 
     const used = this.sessionUsageByConversation.get(key) ?? 0;
-    if (sessionId && used + promptChars > SESSION_CONTEXT_BUDGET_CHARS) {
+    const sessionBudget = charBudgetForTokens(
+      params.messages,
+      SESSION_CONTEXT_BUDGET_TOKENS,
+    );
+    if (sessionId && used + promptChars > sessionBudget) {
       log(
         `[${this.id}] session context budget reached (${used}+${promptChars} chars) — rolling over`,
       );
@@ -367,7 +385,18 @@ export class DeepSeekProvider extends BaseAIProvider {
       // whenever it held any; past that the prompt itself is over the window
       // and has to be narrowed down.
       if (isContextLimit(error)) {
-        const shrinks = SHRUNK_PROMPT_CHARS.map((chars) => shrinkPrompt(chars));
+        // Halve down from what was actually sent, not from a fixed ceiling:
+        // a budget at or above the refused size would resend it unchanged.
+        const refused = estimatePromptChars(
+          params,
+          this.promptCapByConversation.get(key),
+        );
+        const budgets = new Set(
+          SHRUNK_PROMPT_FRACTIONS.map((share) =>
+            Math.max(MIN_PROMPT_CHARS, Math.floor(refused * share)),
+          ).filter((chars) => chars < refused),
+        );
+        const shrinks = [...budgets].map((chars) => shrinkPrompt(chars));
         return this.sessionUsageByConversation.get(key)
           ? [freshSession, ...shrinks]
           : shrinks;
@@ -454,13 +483,15 @@ function isUnknownSession(error: unknown): boolean {
 }
 
 /**
- * The session ran out of room — "Length limit reached. Please start a new
- * chat.", which is exactly what the recovery does on the user's behalf.
+ * The turn does not fit. Two upstream wordings, both recovered the same way:
+ * "Length limit reached. Please start a new chat." for a session that ran out
+ * of room, and "Content is too long. Please shorten it and try again."
+ * (`input_exceeds_limit`) for a single prompt over the input window.
  */
 function isContextLimit(error: unknown): boolean {
   return (
     error instanceof Error &&
-    /context_length_exceeded|length limit reached|start a new chat/i.test(
+    /context_length_exceeded|input_exceeds_limit|length limit reached|content is too long|start a new chat/i.test(
       error.message,
     )
   );
@@ -496,5 +527,8 @@ function estimatePromptChars(params: AIRequestParams, cap?: number): number {
     if (message.role === "system") continue;
     total += contentToString(message.content).length;
   }
-  return Math.min(total, cap ?? MAX_PROMPT_CHARS);
+  return Math.min(
+    total,
+    cap ?? charBudgetForTokens(params.messages, MAX_PROMPT_TOKENS),
+  );
 }
