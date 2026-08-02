@@ -16,19 +16,27 @@ const MARKER_HOLDBACK_CHARS = 11;
 
 // Small models "play out" the joined transcript after their answer, echoing the
 // role prefixes, our tool-result placeholder, or a whole tool result with its
-// call id. Anchoring to line starts and to very specific markers keeps false
-// cuts unlikely. Shared by all providers — Qwen/DeepSeek/Kimi/MiMo all join the
-// dialog the same way.
+// call id. Shared by all providers — Qwen/DeepSeek/Kimi/MiMo all join the dialog
+// the same way.
+//
+// Everything after a marker is dropped, so a false positive costs the rest of
+// the answer *and* the tool call that was about to follow. Each alternative is
+// therefore narrowed to what `buildRolePrompt`/`vsCodeMessageToAI` actually
+// write, and `findCut` additionally ignores anything inside a ``` block.
 const TRANSCRIPT_CUT_PATTERN = new RegExp(
   [
-    // `\nUser:` / `\nAssistant:` at the start of a line
-    "(?:\\n|^)[ \\t]*(?:user|assistant)[ \\t]*:",
-    // our own placeholder
-    "\\[tool result id=",
-    // a call id echoed anywhere, e.g. `Environment: [toolu_bdrk_018gnVobT…]`
-    "\\[(?:toolu|call|tooluse)_[\\w-]{6,}",
+    // `\nUser: ` / `\nAssistant: ` at column 0, in the exact casing the prompt
+    // uses. Indented or lower-case `user:` is a config/object key — the answer
+    // to a question about code is full of them.
+    "\\n(?:User|Assistant):(?=[ \\t\\n])",
+    // our own placeholder, which models echo verbatim
+    "\\[[Tt]ool result id=",
+    // a call id echoed anywhere, e.g. `Environment: [toolu_bdrk_018gnVobT…]`.
+    // Generated ids always carry a digit or a capital; `[call_procedure_key]`
+    // written in prose does not.
+    "\\[(?:toolu|call|tooluse)_(?=[\\w-]*[A-Z0-9])[\\w-]{6,}",
   ].join("|"),
-  "i",
+  "g",
 );
 // Longest marker prefix worth holding back: len("[Tool result id=") - 1.
 const TRANSCRIPT_CUT_HOLDBACK_CHARS = 15;
@@ -36,6 +44,50 @@ const TRANSCRIPT_CUT_HOLDBACK_CHARS = 15;
 // held back too — otherwise a label like `Environment: ` is already in the chat
 // by the time the marker arrives. Bounded, so a long paragraph still streams.
 const TRANSCRIPT_CUT_LINE_HOLDBACK_CHARS = 200;
+
+/**
+ * Position inside the ``` fences of the answer, carried across chunks.
+ *
+ * A quoted chat log, a YAML `user:` key or a snippet of our own protocol sit
+ * inside a code block, where none of the transcript markers mean what they mean
+ * in prose. `head`/`decided` track the line being scanned so a fence split
+ * across two chunks is still recognised.
+ */
+interface FenceState {
+  open: boolean;
+  head: string;
+  decided: boolean;
+}
+
+const INITIAL_FENCE_STATE: FenceState = {
+  open: false,
+  head: "",
+  decided: false,
+};
+
+/** Advances the fence state over the next contiguous piece of the answer. */
+function scanFences(text: string, state: FenceState): FenceState {
+  let { open, head, decided } = state;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\n") {
+      head = "";
+      decided = false;
+      continue;
+    }
+    if (decided) continue;
+    // Indentation before a fence is common in lists; skip it.
+    if (!head && (ch === " " || ch === "\t")) continue;
+
+    head += ch;
+    if (head === "`" || head === "``") continue;
+    if (head === "```") open = !open;
+    decided = true;
+  }
+
+  return { open, head, decided };
+}
 
 /**
  * Unpaired closing tags. The model drops them into the stream away from the
@@ -126,6 +178,8 @@ export class StreamingToolCallRouter {
   private holdActive = false;
   private cutActive = false;
   private cutBuffer = "";
+  /** Fence state at `cutBuffer[0]`, i.e. everything already emitted. */
+  private fence: FenceState = INITIAL_FENCE_STATE;
 
   constructor(
     private readonly allowToolCalls: boolean,
@@ -159,12 +213,17 @@ export class StreamingToolCallRouter {
     }
 
     this.cutBuffer += rawText;
-    const match = TRANSCRIPT_CUT_PATTERN.exec(this.cutBuffer);
-    if (match) {
+    const cutIdx = this.findCut();
+    if (cutIdx !== -1) {
       this.cutActive = true;
+      this.logger?.(
+        `${this.logPrefix}transcript boundary at ${JSON.stringify(
+          this.cutBuffer.slice(cutIdx, cutIdx + 40),
+        )} — dropping the rest of the answer`,
+      );
       // Drop the whole line the marker sits on: a label in front of it
       // (`Environment: [toolu_…]`) belongs to the echo, not to the answer.
-      const lineStart = this.cutBuffer.lastIndexOf("\n", match.index) + 1;
+      const lineStart = this.cutBuffer.lastIndexOf("\n", cutIdx) + 1;
       const safe = this.cutBuffer.slice(0, lineStart).replace(/\s+$/, "");
       this.cutBuffer = "";
       if (safe) yield* this.routeSafe(safe);
@@ -186,7 +245,25 @@ export class StreamingToolCallRouter {
     }
     const safe = this.cutBuffer.slice(0, emitUpTo);
     this.cutBuffer = this.cutBuffer.slice(emitUpTo);
+    this.fence = scanFences(safe, this.fence);
     yield* this.routeSafe(safe);
+  }
+
+  /**
+   * First transcript marker that is really a fabricated turn: index in
+   * `cutBuffer`, or -1. Markers inside a ``` block are quoted material — the
+   * answer to a question about code is full of them — and are skipped.
+   */
+  private findCut(): number {
+    TRANSCRIPT_CUT_PATTERN.lastIndex = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = TRANSCRIPT_CUT_PATTERN.exec(this.cutBuffer)) !== null) {
+      const upTo = this.cutBuffer.slice(0, match.index);
+      if (!scanFences(upTo, this.fence).open) return match.index;
+    }
+
+    return -1;
   }
 
   /** Flushes the buffers: parses a tool call, or emits the tail as text. */

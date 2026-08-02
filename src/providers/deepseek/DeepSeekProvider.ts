@@ -4,7 +4,7 @@ import { BaseAIProvider } from "../BaseAIProvider";
 import { isAbortError, isNetworkFailure } from "../common/http";
 import { contentToString, conversationKey } from "../common/messages";
 import type { AIModelInfo, AIRequestParams, AIStreamChunk } from "../types";
-import { AuthExpiredError } from "../types";
+import { AuthExpiredError, RateLimitError } from "../types";
 import type { DeepSeekAuthState } from "./DeepSeekApiClient";
 import { DeepSeekApiClient, MAX_PROMPT_CHARS } from "./DeepSeekApiClient";
 import { DeepSeekAuthManager } from "./DeepSeekAuthManager";
@@ -12,6 +12,16 @@ import { DEEPSEEK_MODELS } from "./DeepSeekModels";
 
 /** Backoff before re-entering the single generation slot. */
 const PARALLEL_LIMIT_RETRY_DELAYS_MS = [1500, 4000];
+
+/**
+ * Backoff for the account-wide throttle ("Messages too frequent"). It counts
+ * turns over a window rather than concurrency, so it needs a real pause — the
+ * sub-second backoff a busy generation slot gets would just burn the retries.
+ */
+const RATE_LIMIT_RETRY_DELAYS_MS = [3000, 8000, 18000];
+
+/** Longest `Retry-After` worth honouring before giving the error to the user. */
+const MAX_RETRY_AFTER_MS = 30000;
 
 /** Backoff after a dropped connection. Prompts here are ~100 KB, so retries
  *  are not free — two attempts, then give the error to the user. */
@@ -328,6 +338,17 @@ export class DeepSeekProvider extends BaseAIProvider {
     }
 
     const stepsFor = (error: unknown): Array<() => Promise<Attempt>> => {
+      // Checked before the slot limit: both mean "come back later", but only
+      // this one is counted per account over a window rather than per request.
+      if (isRateLimited(error)) {
+        const hinted =
+          error instanceof RateLimitError && error.retryAfterMs
+            ? Math.min(error.retryAfterMs, MAX_RETRY_AFTER_MS)
+            : 0;
+        return RATE_LIMIT_RETRY_DELAYS_MS.map((ms, i) =>
+          waitAndRetry(i === 0 ? Math.max(ms, hinted) : ms, "rate limited"),
+        );
+      }
       if (isParallelLimit(error)) {
         return PARALLEL_LIMIT_RETRY_DELAYS_MS.map((ms) =>
           waitAndRetry(ms, "generation slot busy"),
@@ -388,6 +409,21 @@ function isParallelLimit(error: unknown): boolean {
   );
 }
 
+/**
+ * The account sent too many turns too quickly. DeepSeek reports it inside the
+ * stream — `{"type":"error","finish_reason":"rate_limit_reached"}` — so it
+ * arrives as a plain ProviderError, not as an HTTP 429.
+ */
+function isRateLimited(error: unknown): boolean {
+  return (
+    error instanceof RateLimitError ||
+    (error instanceof Error &&
+      /rate_limit_reached|messages too frequent|too many requests/i.test(
+        error.message,
+      ))
+  );
+}
+
 /** Server still generating the previous answer in this session. */
 function isSessionBusy(error: unknown): boolean {
   return (
@@ -445,6 +481,7 @@ function isRecoverable(error: unknown): boolean {
     isSessionBusy(error) ||
     isStaleParent(error) ||
     isParallelLimit(error) ||
+    isRateLimited(error) ||
     isExpertBusy(error) ||
     isUnknownSession(error) ||
     isContextLimit(error) ||
