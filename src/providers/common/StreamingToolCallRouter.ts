@@ -286,12 +286,24 @@ export class StreamingToolCallRouter {
         yield* toolChunks;
         if (remainder.trim()) yield* this.emitText(remainder);
       } else {
-        yield* this.emitText(remainder || holdBuffer.trim());
+        yield* this.emitText(this.releaseHold(holdBuffer, remainder));
       }
     }
 
     if (tailText) yield* this.emitText(tailText);
     yield* this.flushCloseTagTail();
+  }
+
+  /**
+   * Text of a hold that produced no call. When nothing in it looks like the
+   * protocol the marker was a false positive on ordinary content — a JSON
+   * snippet the user asked for — and it is released exactly as it arrived:
+   * `sanitizeHoldRemainder` is meant for protocol junk and would eat the code
+   * fences and the indentation of a legitimate block.
+   */
+  private releaseHold(holdBuffer: string, remainder: string): string {
+    if (!looksLikeToolCallStart(holdBuffer)) return holdBuffer;
+    return remainder || holdBuffer.trim();
   }
 
   /**
@@ -305,7 +317,10 @@ export class StreamingToolCallRouter {
 
     if (holdBuffer) {
       yield* this.emitText(
-        stripDanglingToolCallMarkers(sanitizeHoldRemainder(holdBuffer)),
+        this.releaseHold(
+          holdBuffer,
+          stripDanglingToolCallMarkers(sanitizeHoldRemainder(holdBuffer)),
+        ),
       );
     }
     if (tailText) yield* this.emitText(tailText);
@@ -331,11 +346,15 @@ export class StreamingToolCallRouter {
       this.holdBuffer += rawText;
       const overSoftLimit = this.holdBuffer.length >= MAX_HOLD_CHARS;
       const overHardCap = this.holdBuffer.length >= MAX_HOLD_HARD_CAP_CHARS;
-      if (
-        (overSoftLimit && !looksLikeToolCallStart(this.holdBuffer)) ||
-        overHardCap
-      ) {
-        yield* this.emitText(stripDanglingToolCallMarkers(this.holdBuffer));
+      const looksLikeCall = looksLikeToolCallStart(this.holdBuffer);
+      if ((overSoftLimit && !looksLikeCall) || overHardCap) {
+        // Same rule as `releaseHold`: content that never looked like protocol
+        // goes back out untouched, fences and indentation included.
+        yield* this.emitText(
+          looksLikeCall
+            ? stripDanglingToolCallMarkers(this.holdBuffer)
+            : this.holdBuffer,
+        );
         this.holdBuffer = "";
         this.holdActive = false;
       }

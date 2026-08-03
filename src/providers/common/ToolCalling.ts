@@ -21,11 +21,19 @@ const TOOL_CALL_MARKERS = [
 // Shortest partial marker prefix we accept, so a plain ``` fence is not held.
 const MIN_PARTIAL_MARKER_LEN = 6;
 
-// Start of a bare JSON tool call: {"name":
-const JSON_START_RE = /\{\s*"name"\s*:/;
+// Start of a bare JSON tool call: {"name": / {"tool": "…"
+const JSON_START_RE = /\{\s*"(?:name|tool)"\s*:/;
+// Start of a wrapper object the model invented: {"tool_call": {…
+const ENVELOPE_START_RE =
+  /\{\s*"(?:tool_call|tool_calls|tool_use|function_call)"\s*:/i;
 // Partial tail: `{`, `{\n`, `{ "`, `{"na`, … Qwen deltas are 1–35 chars and
 // regularly break right after `{`, which used to leak the brace into the chat.
 const JSON_PARTIAL_TAIL_RE = /\{\s*(?:"(?:n(?:a(?:m(?:e)?)?)?)?)?$/;
+
+// A fence the model opened immediately before the call (```json\n{"tool_call"…).
+// Only a fence carrying a language tag: a bare ``` is ambiguous — it may be
+// closing an earlier block, and swallowing it breaks that block's rendering.
+const FENCE_OPENER_TAIL_RE = /(^|\n)[ \t]*```[a-zA-Z0-9_-]+[ \t]*\r?\n[ \t]*$/;
 
 /**
  * Index where the first tool-call marker starts — full, or partial at the end
@@ -55,8 +63,53 @@ export function findToolCallMarkerStart(text: string): number {
   }
 
   take(JSON_START_RE.exec(text)?.index ?? -1);
+  take(ENVELOPE_START_RE.exec(text)?.index ?? -1);
   take(JSON_PARTIAL_TAIL_RE.exec(text)?.index ?? -1);
-  return earliest;
+  return earliest === -1 ? -1 : expandMarkerStart(text, earliest);
+}
+
+/**
+ * Widens the marker to the wrapper the call sits in.
+ *
+ * Models regularly bury the call in an object of their own
+ * (`{"tool_call": {"name":…}}`) or open a fenced block for it. The marker is
+ * then found at the inner `{`, and everything in front of it — ```` ```json ````,
+ * `{`, `"tool_call":` — has already been streamed into the chat by the time the
+ * call is recognised. That leftover is what the user sees as a stray JSON block.
+ */
+function expandMarkerStart(text: string, markerIdx: number): number {
+  let start = markerIdx;
+
+  // `{`, `{ "tool_call": `, `{"result": {"tool_call": ` — bounded, so a marker
+  // deep inside real prose cannot drag the whole answer into the hold.
+  for (let depth = 0; depth < 4; depth++) {
+    let i = skipSpaceBack(text, start - 1);
+
+    if (i >= 0 && text[i] === ":") {
+      i = skipSpaceBack(text, i - 1);
+      if (i < 0 || text[i] !== '"') break;
+      const keyEnd = i--;
+      while (i >= 0 && /[\w.$-]/.test(text[i])) i--;
+      if (i < 0 || text[i] !== '"' || keyEnd - i < 2) break;
+      i = skipSpaceBack(text, i - 1);
+    }
+
+    if (i < 0 || text[i] !== "{") break;
+    start = i;
+  }
+
+  const fence = FENCE_OPENER_TAIL_RE.exec(text.slice(0, start));
+  if (fence) {
+    start = (fence.index ?? 0) + (fence[1] ? 1 : 0);
+  }
+
+  return start;
+}
+
+function skipSpaceBack(text: string, from: number): number {
+  let i = from;
+  while (i >= 0 && /\s/.test(text[i])) i--;
+  return i;
 }
 
 /**
@@ -66,8 +119,9 @@ export function findToolCallMarkerStart(text: string): number {
 export function looksLikeToolCallStart(text: string): boolean {
   return (
     /```tool_call|<tool_call|<function\s*=|<tool_name>/i.test(text) ||
+    /"(?:tool_call|tool_calls|tool_use|function_call)"\s*:/i.test(text) ||
     /"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:/.test(text) ||
-    /"arguments"\s*:\s*\{/.test(text)
+    /"(?:arguments|parameters|params|input|args)"\s*:\s*\{/.test(text)
   );
 }
 
@@ -82,12 +136,9 @@ export function stripInlineToolCallJson(text: string): string {
   while (i < text.length) {
     if (text[i] === "{") {
       const extracted = extractBalancedJsonAt(text, i);
-      const parsed = extracted ? tryParseJson(extracted.json) : undefined;
-      if (
-        extracted &&
-        typeof parsed?.name === "string" &&
-        argumentsOf(parsed) !== undefined
-      ) {
+      // Unanchored on purpose: this runs on ordinary answer text, where a JSON
+      // object without an arguments field is data the user asked to see.
+      if (extracted && callsFromJsonText(extracted.json, false).length > 0) {
         i = extracted.end;
         continue;
       }
@@ -162,6 +213,10 @@ export function buildToolsSystemPrompt(tools: AIToolDefinition[]): string {
     "",
     "Alternative accepted format (fallback only):",
     '<tool_call>{"name":"tool_name","arguments":{...}}</tool_call>',
+    "",
+    "The object has exactly two keys — `name` and `arguments`:",
+    '- Every parameter goes INSIDE `arguments`. Never next to `name`: {"name":"read_file","filePath":"…"} is wrong.',
+    '- Never wrap the object in another one: {"tool_call":{…}} and {"function":{…}} are wrong.',
     "",
     "JSON validity is CRITICAL — a malformed call is dropped:",
     '- Every string value MUST be valid JSON: escape " as \\", newlines as \\n, backslashes as \\\\, tabs as \\t.',
@@ -279,16 +334,12 @@ function parseTaggedCalls(text: string): {
       break;
     }
 
-    const parsed = tryParseJson(
+    const parsed = callsFromJsonText(
       text.slice(openIdx + OPEN.length, closeIdx).trim(),
+      true,
     );
-    if (parsed) {
-      calls.push(
-        createToolCallChunk({
-          name: parsed.name ?? "",
-          argumentsValue: parsed.arguments ?? {},
-        }),
-      );
+    if (parsed.length > 0) {
+      calls.push(...toChunks(parsed));
     } else {
       keep(text.slice(openIdx, closeIdx + CLOSE.length));
     }
@@ -323,15 +374,8 @@ function parseAttributeTagCalls(text: string): AIStreamChunk[] {
 function parseCodeFenceCalls(text: string): AIStreamChunk[] {
   const calls: AIStreamChunk[] = [];
   for (const match of text.matchAll(/```tool_call\s*([\s\S]*?)```/g)) {
-    const parsed = tryParseJson((match[1] ?? "").trim());
-    if (typeof parsed?.name === "string" && parsed.name) {
-      calls.push(
-        createToolCallChunk({
-          name: parsed.name,
-          argumentsValue: argumentsOf(parsed) ?? {},
-        }),
-      );
-    }
+    // The fence declares protocol, so a flat `{"name":…,"filePath":…}` counts.
+    calls.push(...toChunks(callsFromJsonText((match[1] ?? "").trim(), true)));
   }
   return calls;
 }
@@ -358,13 +402,8 @@ function parseLooseJsonCalls(text: string): AIStreamChunk[] {
   const calls: AIStreamChunk[] = [];
 
   for (const raw of extractBalancedJsonObjects(text)) {
-    const parsed = tryParseJson(raw);
-    const name = typeof parsed?.name === "string" ? parsed.name.trim() : "";
-    const args = parsed ? argumentsOf(parsed) : undefined;
-    // A plain object with a "name" but no arguments field is data, not a call.
-    if (name && args !== undefined) {
-      calls.push(createToolCallChunk({ name, argumentsValue: args }));
-    }
+    // Unanchored: a plain object with a "name" but no arguments is data.
+    calls.push(...toChunks(callsFromJsonText(raw, false)));
   }
 
   return calls;
@@ -436,16 +475,8 @@ function parsePrefixedCalls(text: string): AIStreamChunk[] {
     const extracted = extractBalancedJsonAt(text, objStart);
     if (!extracted) break;
 
-    const parsed = tryParseJson(extracted.json);
-    const name = typeof parsed?.name === "string" ? parsed.name.trim() : "";
-    if (name) {
-      calls.push(
-        createToolCallChunk({
-          name,
-          argumentsValue: (parsed && argumentsOf(parsed)) ?? {},
-        }),
-      );
-    }
+    // The literal `tool_call` in front of the object is the anchor.
+    calls.push(...toChunks(callsFromJsonText(extracted.json, true)));
     searchFrom = extracted.end;
   }
 
@@ -585,13 +616,9 @@ function parseArgumentsBlock(raw: string): Record<string, unknown> {
   const start = body.indexOf("{");
   if (start !== -1) {
     const balanced = extractBalancedJsonAt(body, start);
-    const parsed = balanced ? tryParseJson(balanced.json) : undefined;
+    const parsed = asObject(balanced ? tryParseJson(balanced.json) : undefined);
     if (parsed) {
-      const inner =
-        typeof parsed.name === "string"
-          ? asObject(argumentsOf(parsed))
-          : undefined;
-      return inner ?? asObject(parsed) ?? {};
+      return unwrapNestedCall(parsed) ?? parsed;
     }
   }
 
@@ -789,6 +816,208 @@ function tryParseJson(raw: string): ParsedCall | undefined {
 
 function argumentsOf(parsed: ParsedCall): unknown {
   return parsed.arguments ?? parsed.params ?? parsed.input;
+}
+
+/** Where the tool name can sit. `tool`/`function` only when they hold a string. */
+const NAME_KEYS = [
+  "name",
+  "tool",
+  "tool_name",
+  "toolName",
+  "function",
+  "function_name",
+  "recipient_name",
+];
+
+/** Where the arguments can sit. */
+const ARGS_KEYS = [
+  "arguments",
+  "args",
+  "parameters",
+  "params",
+  "input",
+  "tool_arguments",
+  "toolArguments",
+  "kwargs",
+];
+
+/** Wrappers models put the call into. The first four are protocol by themselves. */
+const ENVELOPE_KEYS = [
+  "tool_call",
+  "toolCall",
+  "tool_calls",
+  "toolCalls",
+  "tool_use",
+  "toolUse",
+  "function_call",
+  "functionCall",
+  "function",
+  "tool",
+  "action",
+  "call",
+];
+const PROTOCOL_ENVELOPE_KEYS = new Set([
+  "tool_call",
+  "toolcall",
+  "tool_calls",
+  "toolcalls",
+  "tool_use",
+  "tooluse",
+  "function_call",
+  "functioncall",
+]);
+
+/**
+ * Bookkeeping fields that are never arguments. Deliberately narrow: `id`,
+ * `type` and `index` are left out because tools do declare parameters by those
+ * names, and an extra key a tool ignores is cheaper than a missing one.
+ */
+const META_KEYS = new Set([
+  "call_id",
+  "callid",
+  "tool_call_id",
+  "toolcallid",
+  "tool_use_id",
+  "tooluseid",
+  "thought",
+  "thinking",
+  "reasoning",
+  "recipient",
+]);
+
+const CONTAINER_KEYS = new Set(
+  [...ARGS_KEYS, ...ENVELOPE_KEYS].map((k) => k.toLowerCase()),
+);
+
+interface NormalizedCall {
+  name: string;
+  args: Record<string, unknown>;
+}
+
+/**
+ * Pulls calls out of an already-parsed JSON value, in every shape models emit:
+ * the protocol one, `tool`/`parameters` aliases, the OpenAI
+ * `{"function":{"name":…,"arguments":"{…}"}}` pair, and wrappers such as
+ * `{"tool_call": {…}}` or `{"tool_calls": [ … ]}`.
+ *
+ * `anchored` means the JSON came from an explicit marker (a ```` ```tool_call ````
+ * fence, a `<tool_call>` tag, a protocol wrapper). Only there may the remaining
+ * top-level keys be read as the arguments: models constantly write
+ * `{"name":"read_file","filePath":"…"}` without the `arguments` object, and
+ * dropping those keys used to hand the tool an empty argument set. In free text
+ * that same shape is ordinary data (`{"name":"my-pkg","version":"1.0"}`), so it
+ * is left alone.
+ */
+function callsFromJsonValue(
+  value: unknown,
+  anchored: boolean,
+  depth = 0,
+): NormalizedCall[] {
+  if (depth > 4) return [];
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) =>
+      callsFromJsonValue(item, anchored, depth + 1),
+    );
+  }
+
+  const obj = asObject(value);
+  if (!obj) return [];
+
+  const own = namedBy(obj);
+
+  for (const key of ENVELOPE_KEYS) {
+    const inner = obj[key];
+    // A string here is the tool name, not a wrapper.
+    if (inner === undefined || inner === null || typeof inner !== "object") {
+      continue;
+    }
+    const isProtocol = PROTOCOL_ENVELOPE_KEYS.has(key.toLowerCase());
+    // `function`/`tool`/`action` are only a wrapper when the object does not
+    // name a tool itself — otherwise they are that tool's own parameter.
+    if (!isProtocol && own) continue;
+
+    const wrapped = callsFromJsonValue(inner, anchored || isProtocol, depth + 1);
+    if (wrapped.length > 0) return wrapped;
+  }
+
+  if (!own) return [];
+
+  const args = argumentsFromObject(obj, own.key, anchored);
+  return args ? [{ name: own.name, args }] : [];
+}
+
+function argumentsFromObject(
+  obj: Record<string, unknown>,
+  nameKey: string,
+  anchored: boolean,
+): Record<string, unknown> | undefined {
+  for (const key of ARGS_KEYS) {
+    const raw = obj[key];
+    if (raw === undefined) continue;
+    // OpenAI-style: the arguments arrive as a JSON string.
+    const args = asObject(typeof raw === "string" ? tryParseJson(raw) : raw);
+    if (args) return unwrapNestedCall(args) ?? args;
+  }
+
+  if (!anchored) return undefined;
+
+  // Arguments inlined next to the name. An empty result is still a call —
+  // some tools take no parameters at all. Only the name and the containers
+  // already read above are dropped: a plain `input: "…"` is a real parameter.
+  return Object.fromEntries(
+    Object.entries(obj).filter(([key, value]) => {
+      const lower = key.toLowerCase();
+      if (key === nameKey || META_KEYS.has(lower)) return false;
+      const container = value !== null && typeof value === "object";
+      return !(container && CONTAINER_KEYS.has(lower));
+    }),
+  );
+}
+
+/**
+ * `{"name":…,"arguments":{…}}` written where only the arguments were expected —
+ * the whole envelope repeated one level down. Requires both fields: a lone
+ * `name` is a legitimate parameter of tools like write_file.
+ */
+function unwrapNestedCall(
+  obj: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  if (!namedBy(obj)) return undefined;
+
+  for (const key of ARGS_KEYS) {
+    const raw = obj[key];
+    if (raw === undefined) continue;
+    const inner = asObject(typeof raw === "string" ? tryParseJson(raw) : raw);
+    if (inner) return inner;
+  }
+
+  return undefined;
+}
+
+/** The tool name this object carries, and the key it was found under. */
+function namedBy(
+  obj: Record<string, unknown>,
+): { name: string; key: string } | undefined {
+  for (const key of NAME_KEYS) {
+    const value = obj[key];
+    if (typeof value === "string" && value.trim()) {
+      return { name: value.trim(), key };
+    }
+  }
+  return undefined;
+}
+
+/** Calls from a JSON string, or none when it is not a call at all. */
+function callsFromJsonText(raw: string, anchored: boolean): NormalizedCall[] {
+  const parsed = tryParseJson(raw);
+  return parsed ? callsFromJsonValue(parsed, anchored) : [];
+}
+
+function toChunks(calls: readonly NormalizedCall[]): AIStreamChunk[] {
+  return calls.map((call) =>
+    createToolCallChunk({ name: call.name, argumentsValue: call.args }),
+  );
 }
 
 function asObject(value: unknown): Record<string, unknown> | undefined {
