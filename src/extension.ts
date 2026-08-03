@@ -4,7 +4,6 @@ import type { BaseAIProvider } from "./providers/BaseAIProvider";
 import { UnifiedProvider } from "./providers/UnifiedProvider";
 import { DeepSeekProvider } from "./providers/deepseek/DeepSeekProvider";
 import { KimiProvider } from "./providers/kimi/KimiProvider";
-import { MimoProvider } from "./providers/mimo/MimoProvider";
 import type { OpenAICompatProvider } from "./providers/openai/OpenAICompatProvider";
 import { affectsCustomProviders } from "./providers/openai/customConfig";
 import {
@@ -28,7 +27,6 @@ const PROVIDER_FACTORIES: Record<ProviderKey, () => BaseAIProvider> = {
   qwen: () => new QwenProvider(),
   deepseek: () => new DeepSeekProvider(),
   kimi: () => new KimiProvider(),
-  mimo: () => new MimoProvider(),
 };
 
 export function activate(context: vscode.ExtensionContext): void {

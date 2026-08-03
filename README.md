@@ -11,13 +11,13 @@
 
 > Use free AI models directly in Copilot Chat without API keys, billing, or token counting.
 
-**AI Free VSCode** connects free web-based models through a Playwright browser session — or through a vendor CLI you already have installed, like MiMo Code — and registers them as a Copilot Chat provider.
+**AI Free VSCode** connects free web-based models through a Playwright browser session and registers them as a Copilot Chat provider.
 
 ## What it does
 
 - ✅ Integrates free web-based AI models into Copilot Chat
 - ✅ Requires no API keys and does not use paid OpenAI endpoints
-- ✅ Authenticates via a real browser session (MiMo needs no sign-in at all)
+- ✅ Authenticates via a real browser session
 - ✅ Supports streaming, automatic thinking mode, and tool calling
 - ✅ Exposes models through a unified provider for VS Code
 - ✅ Generates commit messages from your staged diff
@@ -73,27 +73,20 @@ dead entries that fail on use.
 > slow (often minutes) and unreliable. It stays available for commit messages,
 > inline suggestions and Quick Fix, where no tools are involved.
 
-### MiMo Code (CLI)
+### MiMo Code (CLI) — removed
 
-Xiaomi's MiMo, wired through the official
-[MiMo Code CLI](https://github.com/XiaomiMiMo/MiMo-Code) instead of a browser
-session — no API key, no sign-in, nothing stored by the extension.
+Xiaomi has **discontinued the free MiMo API**. The `mimo-auto` channel the
+extension used was anonymous and needed no key or sign-in; it now answers every
+request with an error:
 
-| Model            | ID          | Context |
-| ---------------- | ----------- | ------- |
-| MiMo Auto        | `mimo-auto` | 1M      |
+> MiMo free API service has ended. Sign in or configure a third-party API.
 
-Setup is the install itself:
-
-```bash
-npm install -g @mimo-ai/cli   # or: curl -fsSL https://mimo.xiaomi.com/install | bash
-mimo                          # first run: pick "MiMo Auto" (free, anonymous)
-```
-
-Only the free anonymous channel is exposed; the paid `xiaomi/*` models are
-deliberately left out, since they need a MiMo account. The model appears in the
-picker as soon as `mimo models` reports it. If the binary lives outside
-`~/.mimocode/bin` and `PATH`, point **`freeAI.mimo.path`** at it.
+MiMo Code still lists `mimo/mimo-auto` in `mimo models`, so the model looked
+available right up to the moment a request was sent. Since nothing free is left
+there, MiMo support was dropped from the extension: the provider, the CLI bridge
+and the `freeAI.mimo.path` setting are gone. What remains in MiMo Code requires a
+MiMo Token Plan subscription or your own third-party API — neither fits an
+extension about free models.
 
 ### Your own OpenAI-compatible endpoints
 
@@ -101,16 +94,16 @@ Anything that serves `POST {baseUrl}/chat/completions` can be added as a
 provider: Ollama, LM Studio, llama.cpp, vLLM, OpenRouter, a corporate gateway.
 Its models show up in the same picker, next to the free web ones.
 
-Run **`AI Free VSCode — Open Settings`**, then *+ Add endpoint*:
+Run **`AI Free VSCode — Open Settings`**, then _+ Add endpoint_:
 
-| Field           | Example                    | Notes                                              |
-| --------------- | -------------------------- | -------------------------------------------------- |
-| Name            | `LM Studio`                | Shown in the model picker                          |
-| Base URL        | `http://localhost:1234/v1` | A bare origin gets `/v1` appended automatically     |
-| API key         | `sk-...`                   | Stored in SecretStorage, never in `settings.json`  |
-| Models          | *(empty)*                  | Empty = fetched from `GET {baseUrl}/models`        |
+| Field    | Example                    | Notes                                             |
+| -------- | -------------------------- | ------------------------------------------------- |
+| Name     | `LM Studio`                | Shown in the model picker                         |
+| Base URL | `http://localhost:1234/v1` | A bare origin gets `/v1` appended automatically   |
+| API key  | `sk-...`                   | Stored in SecretStorage, never in `settings.json` |
+| Models   | _(empty)_                  | Empty = fetched from `GET {baseUrl}/models`       |
 
-*Test & load models* checks the connection and fills the list; leave the list
+_Test & load models_ checks the connection and fills the list; leave the list
 empty to keep it in sync with the endpoint, or pin an exact set by hand (useful
 on OpenRouter, where the catalogue is hundreds of models long).
 
@@ -140,8 +133,7 @@ your settings and can be edited as JSON if you prefer:
 ## How it works
 
 1. The extension registers a single Copilot Chat provider: `free-ai-vscode`.
-2. Signing in launches Playwright and stores the authenticated session in `SecretStorage`
-   (MiMo is the exception — it needs no sign-in at all, just the CLI, see below).
+2. Signing in launches Playwright and stores the authenticated session in `SecretStorage`.
 3. Requests are routed through the providers' private API streams (see [Supported models](#supported-models)).
 4. Responses are delivered to VS Code as streamed chunks.
 5. The extension handles tool calling and thinking-mode when available.
@@ -184,20 +176,6 @@ You normally don't need to touch this, but you can pin the browser mode in
 > frequently, so a blocked Qwen request may still occasionally surface — retrying
 > usually clears it.
 
-### MiMo and the CLI bridge
-
-MiMo needs no browser, no key and no sign-in: the extension drives the locally
-installed `mimo` CLI on its free anonymous channel.
-
-On the first MiMo request it starts a headless mimocode server
-(`mimo serve` on a random loopback port, protected with a random Basic-auth
-password) and talks to it over HTTP + SSE, which streams the answer token by
-token and supports cancellation. The server is configured in-memory
-(`MIMOCODE_CONFIG_CONTENT`) with a single tools-free agent, so mimocode acts as
-a plain transport: file edits, terminal commands and tool calls stay on the
-Copilot Chat side. Your `mimocode.jsonc` is never modified. The server shuts
-down after 10 minutes of inactivity, and each request uses a throwaway session.
-
 ## Installation
 
 ### From the VS Code Marketplace (recommended)
@@ -224,8 +202,6 @@ down after 10 minutes of inactivity, and each request uses a throwaway session.
    - `AI Free VSCode — Sign In`
 3. Choose a provider from the list (see [Supported models](#supported-models)).
 4. Sign in with your browser and wait for success.
-   **MiMo Code (CLI)** has no sign-in: if the CLI is missing, a terminal opens to
-   install it, then run `AI Free VSCode — Status`.
 5. Open Copilot Chat and select a model.
 
 Prefer a UI? Run `AI Free VSCode — Open Settings` instead: it has sign-in for
@@ -257,9 +233,8 @@ straight into the commit input box.
 - Pick a model quickly: command `AI Free VSCode — Change Commit Model`
 
 Every model declares which features it is fit for — `chat`, `commit`,
-`suggestions`, `fix` — and each picker lists only the fit ones. MiMo Auto opts
-out of commits and inline suggestions (its reasoning cannot be turned off, so it
-spends the whole request thinking), and Kimi opts out of chat. The flags are
+`suggestions`, `fix` — and each picker lists only the fit ones. Kimi, for
+instance, opts out of chat. The flags are
 independent: commit, suggestions and Quick Fix talk to the providers directly,
 so a model hidden from chat still works for them.
 
@@ -302,20 +277,20 @@ before changing the file.
 Everything below is also editable on one page: **`AI Free VSCode — Open Settings`**
 (sign-in status, your own endpoints, and every setting).
 
-| Setting                             | Default  | Description                                                    |
-| ----------------------------------- | -------- | -------------------------------------------------------------- |
+| Setting                             | Default  | Description                                                       |
+| ----------------------------------- | -------- | ----------------------------------------------------------------- |
 | `freeAI.custom.providers`           | `[]`     | Your own OpenAI-compatible endpoints (keys live in SecretStorage) |
-| `freeAI.playwright.timeout`         | `120000` | Browser sign-in timeout in milliseconds                        |
-| `freeAI.qwen.browserMode`           | `auto`   | Qwen anti-bot fallback browser: `auto` / `headed` / `headless` |
-| `freeAI.commit.enabled`             | `true`   | Show the ✨ commit message generation button in Source Control |
-| `freeAI.commit.model`               | `auto`   | Model for commit messages (`auto` = first available)           |
-| `freeAI.commit.prompt`              | —        | Instruction prepended to the diff for commit generation        |
-| `freeAI.suggestions.enabled`        | `false`  | Enable manual inline ghost-text suggestions                    |
-| `freeAI.suggestions.model`          | `auto`   | Model for inline suggestions                                   |
-| `freeAI.suggestions.maxPrefixChars` | `2000`   | Chars of code before the cursor sent to the model              |
-| `freeAI.suggestions.maxSuffixChars` | `800`    | Chars of code after the cursor sent to the model               |
-| `freeAI.fix.enabled`                | `true`   | Show the "Fix with AI Free" Quick Fix on diagnostics           |
-| `freeAI.fix.model`                  | `auto`   | Model for fixing problems                                      |
+| `freeAI.playwright.timeout`         | `120000` | Browser sign-in timeout in milliseconds                           |
+| `freeAI.qwen.browserMode`           | `auto`   | Qwen anti-bot fallback browser: `auto` / `headed` / `headless`    |
+| `freeAI.commit.enabled`             | `true`   | Show the ✨ commit message generation button in Source Control    |
+| `freeAI.commit.model`               | `auto`   | Model for commit messages (`auto` = first available)              |
+| `freeAI.commit.prompt`              | —        | Instruction prepended to the diff for commit generation           |
+| `freeAI.suggestions.enabled`        | `false`  | Enable manual inline ghost-text suggestions                       |
+| `freeAI.suggestions.model`          | `auto`   | Model for inline suggestions                                      |
+| `freeAI.suggestions.maxPrefixChars` | `2000`   | Chars of code before the cursor sent to the model                 |
+| `freeAI.suggestions.maxSuffixChars` | `800`    | Chars of code after the cursor sent to the model                  |
+| `freeAI.fix.enabled`                | `true`   | Show the "Fix with AI Free" Quick Fix on diagnostics              |
+| `freeAI.fix.model`                  | `auto`   | Model for fixing problems                                         |
 
 Thinking (reasoning) is automatic: enabled in plain chat, disabled when tools are
 active (reasoning is unreliable with tool calling on these backends).
@@ -343,14 +318,14 @@ By default all providers are included. The build prints the active set, e.g.
 # Build without Qwen
 PROVIDER_QWEN=false npm run bundle
 
-# Build with only DeepSeek (drop Qwen, Kimi and MiMo)
-PROVIDER_QWEN=false PROVIDER_KIMI=false PROVIDER_MIMO=false npm run bundle
+# Build with only DeepSeek (drop Qwen and Kimi)
+PROVIDER_QWEN=false PROVIDER_KIMI=false npm run bundle
 
 # Package a VSIX without Qwen
 PROVIDER_QWEN=false npm run bundle && npm run package
 ```
 
-Provider keys: `qwen`, `deepseek`, `kimi`, `mimo`. Adding a new provider means
+Provider keys: `qwen`, `deepseek`, `kimi`. Adding a new provider means
 registering its key in [`src/providers/providerConfig.ts`](src/providers/providerConfig.ts),
 [`esbuild.js`](esbuild.js), and the factory map in [`src/extension.ts`](src/extension.ts).
 
@@ -358,8 +333,6 @@ registering its key in [`src/providers/providerConfig.ts`](src/providers/provide
 
 - VS Code `^1.105.0`
 - System Chrome or network access for Playwright to download Chromium
-- For the MiMo provider only: the [MiMo Code CLI](https://github.com/XiaomiMiMo/MiMo-Code)
-  (`npm i -g @mimo-ai/cli`) and Node.js 18+
 
 ## Important notice
 

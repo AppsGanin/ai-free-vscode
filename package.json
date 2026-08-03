@@ -290,16 +290,10 @@
             "markdownDescription": "How the Qwen anti-bot (WAF) fallback browser runs. Changing this needs a window reload.",
             "order": 1
           },
-          "freeAI.mimo.path": {
-            "type": "string",
-            "default": "",
-            "order": 2,
-            "markdownDescription": "Path to the MiMo Code CLI (`mimo`). Empty = auto-detect in `~/.mimocode/bin` and `PATH`."
-          },
           "freeAI.playwright.timeout": {
             "type": "number",
             "default": 120000,
-            "order": 3,
+            "order": 2,
             "description": "Browser sign-in timeout, in milliseconds."
           }
         }

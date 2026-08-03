@@ -5,7 +5,7 @@
  */
 declare const __ENABLED_PROVIDERS__: string[] | undefined;
 
-export const ALL_PROVIDERS = ["qwen", "deepseek", "kimi", "mimo"] as const;
+export const ALL_PROVIDERS = ["qwen", "deepseek", "kimi"] as const;
 export type ProviderKey = (typeof ALL_PROVIDERS)[number];
 
 const enabled: ReadonlySet<string> =

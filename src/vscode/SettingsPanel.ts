@@ -26,7 +26,6 @@ const FEATURE_SETTINGS = [
   "freeAI.fix.model",
   "freeAI.debug",
   "freeAI.qwen.browserMode",
-  "freeAI.mimo.path",
   "freeAI.playwright.timeout",
 ] as const;
 

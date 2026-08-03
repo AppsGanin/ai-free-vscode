@@ -16,7 +16,7 @@ const MARKER_HOLDBACK_CHARS = 11;
 
 // Small models "play out" the joined transcript after their answer, echoing the
 // role prefixes, our tool-result placeholder, or a whole tool result with its
-// call id. Shared by all providers — Qwen/DeepSeek/Kimi/MiMo all join the dialog
+// call id. Shared by all providers — Qwen/DeepSeek/Kimi all join the dialog
 // the same way.
 //
 // Everything after a marker is dropped, so a false positive costs the rest of
@@ -163,7 +163,7 @@ function sanitizeHoldRemainder(text: string): string {
 /**
  * Routes a text stream into text / tool_call chunks.
  *
- * Web models (DeepSeek/Qwen/Kimi/MiMo) have no native tool_calls — they print
+ * Web models (DeepSeek/Qwen/Kimi) have no native tool_calls — they print
  * the call into the answer (```tool_call … ```). This class spots the marker
  * with a sliding window, holds the candidate until the stream ends and then
  * parses it, so the raw protocol never reaches the chat.

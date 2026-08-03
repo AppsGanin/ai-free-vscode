@@ -85,7 +85,7 @@ function budgetChars(
 }
 
 /**
- * Kimi/MiMo accept a single user turn, so the whole conversation is flattened
+ * Kimi accepts a single user turn, so the whole conversation is flattened
  * into `role:text` lines; the tools protocol goes last.
  */
 export function buildFlatTranscript(
