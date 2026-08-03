@@ -167,6 +167,26 @@ export function isRemoteWindow(): boolean {
   return Boolean(vscode.env.remoteName);
 }
 
+/**
+ * Shell command that runs an executable given by its absolute path.
+ *
+ * PowerShell — the default terminal profile on Windows — parses a quoted path as
+ * a string expression and merely echoes it, so the binary only starts when the
+ * path goes through the call operator. cmd and POSIX shells execute the quoted
+ * path as it is and get it unchanged.
+ */
+export function runFileCommand(file: string): string {
+  return isPowerShell() ? `& "${file}"` : `"${file}"`;
+}
+
+/** `env.shell` follows terminal.integrated.defaultProfile, i.e. the shell our terminals get. */
+function isPowerShell(): boolean {
+  const shell = (vscode.env.shell || "").toLowerCase();
+  // No shell reported: VS Code's default profile on Windows is PowerShell.
+  if (!shell) return IS_WINDOWS;
+  return shell.includes("powershell") || shell.includes("pwsh");
+}
+
 async function createLocalTerminal(
   name: string,
 ): Promise<vscode.Terminal | undefined> {
@@ -216,7 +236,9 @@ async function createLocalTerminal(
 
 /** Last resort: the user runs the commands in their own local shell. */
 async function offerCommandsForLocalShell(commands: string[]): Promise<void> {
-  const script = commands.join(" && ");
+  // One command per line rather than `&&`: Windows PowerShell 5.1 has no `&&`,
+  // and the terminal path does not chain them either.
+  const script = commands.join("\n");
   const copy = "Copy Command";
   const choice = await vscode.window.showWarningMessage(
     "MiMo Code CLI has to be installed on the machine running the VS Code window, not on the remote host — this extension runs UI-side and only sees local binaries.",

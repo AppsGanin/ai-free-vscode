@@ -5,6 +5,7 @@ import {
   isRemoteWindow,
   listCliModelRoutes,
   resolveMimoBinary,
+  runFileCommand,
   runInTerminal,
 } from "./MimoCli";
 import { findModelIdByRoute } from "./MimoModels";
@@ -69,7 +70,7 @@ export class MimoAuthManager {
 
     // CLI present but offering nothing — usually its first-run wizard is unfinished.
     alog.warn("CLI found but MiMo Auto is not available");
-    if (await runInTerminal("MiMo Code — Setup", `"${bin}"`)) {
+    if (await runInTerminal("MiMo Code — Setup", runFileCommand(bin))) {
       vscode.window.showInformationMessage(
         "MiMo Code CLI reports no free model. Finish its first-run setup in the opened terminal (choose MiMo Auto), then run “AI Free VSCode — Status”.",
       );
