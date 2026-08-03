@@ -73,21 +73,6 @@ dead entries that fail on use.
 > slow (often minutes) and unreliable. It stays available for commit messages,
 > inline suggestions and Quick Fix, where no tools are involved.
 
-### MiMo Code (CLI) — removed
-
-Xiaomi has **discontinued the free MiMo API**. The `mimo-auto` channel the
-extension used was anonymous and needed no key or sign-in; it now answers every
-request with an error:
-
-> MiMo free API service has ended. Sign in or configure a third-party API.
-
-MiMo Code still lists `mimo/mimo-auto` in `mimo models`, so the model looked
-available right up to the moment a request was sent. Since nothing free is left
-there, MiMo support was dropped from the extension: the provider, the CLI bridge
-and the `freeAI.mimo.path` setting are gone. What remains in MiMo Code requires a
-MiMo Token Plan subscription or your own third-party API — neither fits an
-extension about free models.
-
 ### Your own OpenAI-compatible endpoints
 
 Anything that serves `POST {baseUrl}/chat/completions` can be added as a
