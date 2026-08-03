@@ -2,7 +2,7 @@
   "name": "free-ai-vscode",
   "displayName": "AI Free VSCode for Copilot Chat",
   "description": "Use free AI models directly in Copilot Chat",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "publisher": "AppsGanin",
   "license": "MIT",
   "private": false,
