@@ -130,6 +130,25 @@ export async function showSettingsPanel(
   postState();
 }
 
+/**
+ * Writes go to the scope that already defines the setting; readers resolve
+ * folder → workspace → user, so a blind write to Global is invisible whenever
+ * a workspace value shadows it.
+ *
+ * Folder scope is deliberately not a target: this panel belongs to the window,
+ * not to a file, so in a multi-root workspace there is no non-arbitrary folder
+ * to pick. In a single-root one `.vscode/settings.json` surfaces as the
+ * workspace value anyway, which is the case that actually bites.
+ */
+function settingTarget(
+  configuration: vscode.WorkspaceConfiguration,
+  key: string,
+): vscode.ConfigurationTarget {
+  return configuration.inspect(key)?.workspaceValue !== undefined
+    ? vscode.ConfigurationTarget.Workspace
+    : vscode.ConfigurationTarget.Global;
+}
+
 async function handleMessage(
   message: { type: string } & Record<string, unknown>,
   deps: SettingsPanelDeps,
@@ -161,9 +180,12 @@ async function handleMessage(
       if (!(FEATURE_SETTINGS as readonly string[]).includes(key)) {
         throw new Error(`Unknown setting: ${key}`);
       }
-      await vscode.workspace
-        .getConfiguration()
-        .update(key, message.value, vscode.ConfigurationTarget.Global);
+      const configuration = vscode.workspace.getConfiguration();
+      await configuration.update(
+        key,
+        message.value,
+        settingTarget(configuration, key),
+      );
       return;
     }
 

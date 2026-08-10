@@ -242,19 +242,57 @@
   });
 
   // Every plain setting is written back by its `data-setting` key.
+  //
+  // Checkboxes and selects commit on `change`: it fires the moment they are
+  // touched. Text fields and textareas do not — their `change` waits for blur,
+  // so a prompt that was edited and left focused never reached the host. With
+  // `retainContextWhenHidden` the typed text stayed on screen afterwards, which
+  // made it look saved. Those fields debounce on `input` instead.
+  const SETTING_DEBOUNCE_MS = 400;
+
+  /** Fields with an `input` timer still pending, so we can flush on the way out. */
+  /** @type {Map<any, ReturnType<typeof setTimeout>>} */
+  const pendingSettings = new Map();
+
+  const readSetting = (el) =>
+    el.type === "checkbox"
+      ? el.checked
+      : el.type === "number"
+        ? Number(el.value)
+        : el.value;
+
+  function sendSetting(el) {
+    const timer = pendingSettings.get(el);
+    if (timer !== undefined) clearTimeout(timer);
+    pendingSettings.delete(el);
+
+    const key = el.dataset.setting;
+    const value = readSetting(el);
+    // Blur fires `change` right after the debounce already sent the value.
+    if (state.settings[key] === value) return;
+    state.settings[key] = value;
+    post("setSetting", { key, value });
+  }
+
   for (const input of document.querySelectorAll("[data-setting]")) {
-    input.addEventListener("change", () => {
-      const el = /** @type {any} */ (input);
-      const value =
-        el.type === "checkbox"
-          ? el.checked
-          : el.type === "number"
-            ? Number(el.value)
-            : el.value;
-      state.settings[el.dataset.setting] = value;
-      post("setSetting", { key: el.dataset.setting, value });
+    const el = /** @type {any} */ (input);
+    el.addEventListener("change", () => sendSetting(el));
+
+    if (el.type === "checkbox" || el.tagName === "SELECT") continue;
+    el.addEventListener("input", () => {
+      const timer = pendingSettings.get(el);
+      if (timer !== undefined) clearTimeout(timer);
+      pendingSettings.set(
+        el,
+        setTimeout(() => sendSetting(el), SETTING_DEBOUNCE_MS),
+      );
     });
   }
+
+  // Closing the panel within the debounce window must not drop the edit.
+  window.addEventListener("pagehide", () => {
+    for (const el of [...pendingSettings.keys()]) sendSetting(el);
+  });
 
   window.addEventListener("message", (event) => {
     const message = event.data;
