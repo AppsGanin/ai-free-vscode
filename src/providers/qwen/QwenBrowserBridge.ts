@@ -1,5 +1,5 @@
-import type { BrowserContext, Page } from "playwright";
-import { createLogger, errToString } from "../../logger";
+import type { ConsoleMessage, BrowserContext, Page } from "playwright";
+import { createLogger, errToString, isDebugEnabled } from "../../logger";
 import { AuthExpiredError, ProviderError, RateLimitError } from "../types";
 import { launchQwenContext } from "./QwenBrowser";
 
@@ -8,7 +8,7 @@ const HOME_URL = "https://chat.qwen.ai";
 const SINK_BINDING = "__qwenSseSink";
 // App headers of the web client (see appHeaders in QwenApiClient).
 const WEB_VERSION = "0.2.68";
-const BX_V = "2.5.36";
+const BX_V = "2.5.37";
 
 // Timeouts so the bridge fails with a clear error instead of hanging forever.
 const LAUNCH_TIMEOUT_MS = 45000;
@@ -24,6 +24,13 @@ const STREAM_IDLE_TIMEOUT_MS = 120000;
 const POST_JSON_TIMEOUT_MS = 45000;
 
 const blog = createLogger("qwen-browser");
+
+/**
+ * "The chat is in progress!" — upstream is still generating the previous turn.
+ * Kept here as well as in QwenApiClient (isChatBusy) so the bridge needs no
+ * import from its own consumer.
+ */
+const CHAT_BUSY = /chat is in progress|CHAT_IN_PROGRESS/i;
 
 type SinkEvent =
   | {
@@ -113,6 +120,12 @@ export class QwenBrowserBridge {
         blocked = state.wafHit;
       } catch (err) {
         if (state.yielded || !(this.canEscalate && this.mode === "headless")) {
+          throw err;
+        }
+        // A busy chat is upstream state, not a fingerprint verdict: escalating
+        // would relaunch Chrome only to be refused again. The API client stops
+        // the previous stream and retries — let it see this.
+        if (CHAT_BUSY.test(errToString(err))) {
           throw err;
         }
         // In headless the hostile page may hang the fetch; treat that as a block.
@@ -400,7 +413,7 @@ export class QwenBrowserBridge {
 
     const context = await this.ensureContext();
     const page = await context.newPage();
-    page.on("console", (msg) => blog.debug(`[page] ${msg.text()}`));
+    watchConsole(page);
     page.on("pageerror", (err) =>
       blog.warn(`[page error] ${errToString(err)}`),
     );
@@ -501,6 +514,80 @@ export class QwenBrowserBridge {
       blog.warn(`setWindowBounds failed: ${errToString(err)}`);
     }
   }
+}
+
+/**
+ * Previews that carry nothing. `console.log(new Error())` reaches us as the
+ * bare string "Error", and chat.qwen.ai logs plenty of those — the whole reason
+ * the arguments are worth unwrapping.
+ */
+const OPAQUE_PREVIEW = /^(Error|\{\}|\[object \w+\]|undefined|null|)$/;
+
+/**
+ * Mirrors the page console into our channel.
+ *
+ * Playwright renders each console argument as a preview, which throws away an
+ * Error's message. When the preview says nothing, the arguments are unwrapped
+ * inside the page to recover the real text. That costs a round-trip per
+ * message, so it only happens while DEBUG is on and only for opaque lines.
+ */
+function watchConsole(page: Page): void {
+  page.on("console", (msg) => {
+    if (!isDebugEnabled()) return;
+
+    const text = msg.text();
+    const type = msg.type();
+    const tag = type === "log" ? "[page]" : `[page:${type}]`;
+
+    if (!OPAQUE_PREVIEW.test(text.trim())) {
+      blog.debug(`${tag} ${text}`);
+      return;
+    }
+
+    // Their Errors carry neither message nor stack, so unwrapping alone yields
+    // little; the call site is what actually identifies one.
+    const where = consoleLocation(msg);
+
+    void describeConsoleArgs(msg)
+      .then((detail) => blog.debug(`${tag} ${detail || text || "(empty)"}${where}`))
+      // The handles die with the page; a navigation mid-unwrap is normal.
+      .catch(() => blog.debug(`${tag} ${text || "(empty)"}${where}`));
+  });
+}
+
+/** ` @ chunk.js:1:23456` for the console call, when the page reports one. */
+function consoleLocation(msg: ConsoleMessage): string {
+  const { url, lineNumber, columnNumber } = msg.location();
+  return url ? ` @ ${url}:${lineNumber}:${columnNumber}` : "";
+}
+
+/** Unwraps console arguments in the page, where Error objects are still whole. */
+async function describeConsoleArgs(msg: ConsoleMessage): Promise<string> {
+  const parts = await Promise.all(
+    msg.args().map((arg) =>
+      arg
+        .evaluate((value: unknown) => {
+          try {
+            if (value instanceof Error) {
+              const frame = (value.stack ?? "").split("\n")[1] ?? "";
+              const where = frame.trim().replace(/^at\s+/, "");
+              return `${value.name}: ${value.message || "(no message)"}${
+                where ? ` @ ${where}` : ""
+              }`;
+            }
+            if (typeof value === "object" && value !== null) {
+              return JSON.stringify(value).slice(0, 300);
+            }
+            return String(value);
+          } catch {
+            return Object.prototype.toString.call(value);
+          }
+        })
+        .catch(() => ""),
+    ),
+  );
+
+  return parts.filter(Boolean).join(" ").slice(0, 500);
 }
 
 /** Headers for the in-page fetch; built here so both helpers stay identical. */

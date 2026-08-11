@@ -18,7 +18,11 @@ function write(level: LogLevel, message: string): void {
   channel?.appendLine(`[${ts}] [${level}] ${message}`);
 }
 
-function isDebugEnabled(): boolean {
+/**
+ * Exported so callers can skip work that only feeds a DEBUG line — the browser
+ * bridge pays a page round-trip to unwrap console arguments.
+ */
+export function isDebugEnabled(): boolean {
   try {
     return vscode.workspace
       .getConfiguration("freeAI")

@@ -14,7 +14,12 @@ import {
   summarizeToolCalls,
 } from "../common/ToolCalling";
 import type { AIMessage, AIRequestParams, AIStreamChunk } from "../types";
-import { ProviderError, WafChallengeError } from "../types";
+import {
+  AuthExpiredError,
+  ProviderError,
+  RateLimitError,
+  WafChallengeError,
+} from "../types";
 import type { QwenBrowserBridge } from "./QwenBrowserBridge";
 import { QWEN_MODELS, resolveModelId } from "./QwenModels";
 
@@ -28,7 +33,7 @@ const PROVIDER_ID = "ai-free-vscode-qwen";
 // version / x-request-id), not the heavy bx-* signature, are the WAF gate.
 // The versions drift over time.
 const WEB_VERSION = "0.2.68";
-const BX_V = "2.5.36";
+const BX_V = "2.5.37";
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -115,6 +120,81 @@ function appHeaders(token: string, referer: string): Record<string, string> {
   };
 }
 
+interface QwenCreateChatBody {
+  success?: boolean;
+  id?: string;
+  data?: { id?: string; chat_id?: string; code?: string; details?: string };
+}
+
+/**
+ * "The chat is in progress!" — the previous turn is still generating upstream,
+ * so this chat_id refuses new posts. Both transports report it: the direct one
+ * inside an SSE error frame, the browser one as a non-SSE 200 body.
+ */
+function isChatBusy(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /chat is in progress|CHAT_IN_PROGRESS/i.test(msg);
+}
+
+/** One-line, length-capped body for an error message. */
+function excerpt(text: string, limit = 200): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, limit);
+}
+
+/**
+ * chats/new answers HTTP 200 even when it refuses: the verdict is `success:
+ * false` with the reason in `data.code` / `data.details`. An expired token
+ * arrives exactly this way, so it has to be named here — on a bare
+ * ProviderError the provider's token refresh never runs.
+ */
+function createChatBodyError(data: QwenCreateChatBody, raw: string): Error {
+  const code = data.data?.code ?? "";
+  const details = data.data?.details ?? "";
+
+  if (code === "unauthorized" || /expired|log ?in again/i.test(details)) {
+    return new AuthExpiredError(PROVIDER_ID);
+  }
+  return new ProviderError(
+    PROVIDER_ID,
+    `Qwen refused to open a chat: ${details || code || excerpt(raw)}`,
+  );
+}
+
+/**
+ * Names a failed POST /chats/new as precisely as the answer allows.
+ *
+ * `undefined` means neither transport produced an answer: the direct request
+ * and the browser session both failed (see postCreateChat).
+ */
+function createChatError(
+  result: { ok: boolean; status: number; text: string } | undefined,
+): Error {
+  if (!result) {
+    return new ProviderError(
+      PROVIDER_ID,
+      "Could not open a Qwen chat: the direct request and the browser session both failed",
+    );
+  }
+
+  // The WAF answers with an HTML challenge, sometimes even at status 200.
+  if (/^\s*</.test(result.text)) {
+    return new WafChallengeError(
+      PROVIDER_ID,
+      `Qwen anti-bot challenge on chats/new (HTTP ${result.status})`,
+    );
+  }
+  // Only 401 means the session itself: 403 is the WAF just as often.
+  if (result.status === 401) return new AuthExpiredError(PROVIDER_ID);
+  if (result.status === 429) return new RateLimitError(PROVIDER_ID);
+
+  const body = excerpt(result.text);
+  return new ProviderError(
+    PROVIDER_ID,
+    `Qwen refused to open a chat: HTTP ${result.status}${body ? ` — ${body}` : ""}`,
+    result.status,
+  );
+}
+
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -137,12 +217,6 @@ export class QwenApiClient {
 
     if (!chatId) {
       chatId = await this.createChat(bearer, model);
-      if (!chatId) {
-        throw new ProviderError(
-          PROVIDER_ID,
-          "Failed to create chat_id in Qwen API",
-        );
-      }
       log(`[qwen-api] created chat_id=${chatId}`);
     }
 
@@ -182,8 +256,14 @@ export class QwenApiClient {
       resetParent: boolean,
     ): Promise<{ body: QwenRequestBody; chatId: string } | undefined> => {
       log(`[qwen-api] ${reason} — retrying in a NEW chat_id`);
-      const freshChatId = await this.createChat(bearer, model);
-      if (!freshChatId) return undefined;
+      let freshChatId: string;
+      try {
+        freshChatId = await this.createChat(bearer, model);
+      } catch (err) {
+        // Recovery only: surfacing this would mask the error we came here for.
+        log(`[qwen-api] could not open a fresh chat — ${errToString(err)}`);
+        return undefined;
+      }
       onChatIdChanged?.(freshChatId);
       return {
         chatId: freshChatId,
@@ -193,8 +273,58 @@ export class QwenApiClient {
       };
     };
 
+    /**
+     * One full transport attempt: the direct stream, and inside a real browser
+     * session (cookies + browser fingerprint) when the Aliyun WAF turns the
+     * direct one away.
+     *
+     * Every recovery below goes through this rather than through `send`: where
+     * the WAF blocks the direct path it blocks the retries too, so a bare
+     * `send` would die on the WAF instead of recovering.
+     */
+    const attemptOnce = async function* (
+      this: QwenApiClient,
+      currentBody: QwenRequestBody,
+      currentChatId: string,
+    ): AsyncIterable<AIStreamChunk> {
+      try {
+        yield* send(currentBody, currentChatId);
+        return;
+      } catch (err) {
+        if (
+          streamedToUser ||
+          !(err instanceof WafChallengeError) ||
+          !this.browser
+        ) {
+          throw err;
+        }
+        log(
+          "[qwen-api] WAF blocked node-streaming, retrying via browser session",
+        );
+      }
+
+      for await (const chunk of this.parseSSE(
+        this.browser.streamChat({
+          url: requestUrl(currentChatId),
+          token: bearer,
+          body: currentBody,
+          chatId: currentChatId,
+          abortSignal: params.abortSignal,
+        }),
+        allowToolCalls,
+        () => this.stopStream(bearer, currentChatId).catch(() => undefined),
+      )) {
+        // parseSSE is reached directly here, so `send`'s bookkeeping is missed
+        // — and the recovery must never replay what the user already saw.
+        if (chunk.type === "text" || chunk.type === "tool_call") {
+          streamedToUser = true;
+        }
+        yield chunk;
+      }
+    }.bind(this);
+
     try {
-      yield* send(body, chatId);
+      yield* attemptOnce(body, chatId);
       return;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -211,45 +341,24 @@ export class QwenApiClient {
         throw error;
       }
 
-      // Aliyun WAF blocked the direct stream — repeat it inside a real browser
-      // session (cookies + browser fingerprint).
-      if (error instanceof WafChallengeError && this.browser) {
-        log(
-          "[qwen-api] WAF blocked node-streaming, retrying via browser session",
-        );
-        yield* this.parseSSE(
-          this.browser.streamChat({
-            url: requestUrl(chatId),
-            token: bearer,
-            body,
-            chatId,
-            abortSignal: params.abortSignal,
-          }),
-          allowToolCalls,
-        );
-        return;
-      }
-
-      if (/chat is in progress/i.test(msg)) {
+      // Reported by either transport: the previous turn is still generating
+      // upstream, so this chat_id refuses new posts until it is stopped.
+      if (isChatBusy(error)) {
         for (const delayMs of CHAT_IN_PROGRESS_RETRY_DELAYS_MS) {
           await this.stopStream(bearer, chatId).catch(() => undefined);
           await sleep(delayMs);
           try {
-            yield* send(body, chatId);
+            yield* attemptOnce(body, chatId);
             return;
           } catch (retryError) {
-            const retryMsg =
-              retryError instanceof Error
-                ? retryError.message
-                : String(retryError);
-            if (!/chat is in progress/i.test(retryMsg)) throw retryError;
+            if (!isChatBusy(retryError)) throw retryError;
           }
         }
 
         // History is resent in the prompt, so nothing is lost by moving on.
         const fresh = await inFreshChat("chat still in progress", false);
         if (!fresh) throw error;
-        yield* send(fresh.body, fresh.chatId);
+        yield* attemptOnce(fresh.body, fresh.chatId);
         return;
       }
 
@@ -271,7 +380,7 @@ export class QwenApiClient {
             "Failed to create a new chat for retry",
           );
         }
-        yield* send(fresh.body, fresh.chatId);
+        yield* attemptOnce(fresh.body, fresh.chatId);
         return;
       }
 
@@ -279,7 +388,12 @@ export class QwenApiClient {
     }
   }
 
-  async createChat(token: string, model: string): Promise<string | undefined> {
+  /**
+   * @throws the most specific error the answer allows — the reason travels
+   * with it, so a failure reads on its own instead of sending the user to the
+   * output channel.
+   */
+  async createChat(token: string, model: string): Promise<string> {
     // Fields and order as in the web app's POST /api/v2/chats/new.
     const payload = {
       chatId: "",
@@ -292,30 +406,30 @@ export class QwenApiClient {
 
     const result = await this.postCreateChat(token, payload);
     if (!result?.ok) {
+      const error = createChatError(result);
       log(
         `[qwen-api] createChat failed status=${result?.status ?? "n/a"} body=${(
           result?.text ?? ""
         ).slice(0, 300)}`,
       );
-      return undefined;
+      throw error;
     }
 
+    let data: QwenCreateChatBody;
     try {
-      const data = JSON.parse(result.text) as {
-        data?: { id?: string; chat_id?: string };
-        id?: string;
-      };
-      const chatId = data?.data?.id ?? data?.data?.chat_id ?? data?.id;
-      if (!chatId) {
-        log(`[qwen-api] createChat ok but no id: ${result.text.slice(0, 300)}`);
-      }
-      return chatId;
+      data = JSON.parse(result.text) as QwenCreateChatBody;
     } catch {
-      log(
-        `[qwen-api] createChat ok but not JSON: ${result.text.slice(0, 200)}`,
+      throw new ProviderError(
+        PROVIDER_ID,
+        `Qwen answered chats/new with non-JSON: ${excerpt(result.text)}`,
       );
-      return undefined;
     }
+
+    const chatId = data.data?.id ?? data.data?.chat_id ?? data.id;
+    if (chatId) return chatId;
+
+    log(`[qwen-api] createChat rejected in body: ${excerpt(result.text, 300)}`);
+    throw createChatBodyError(data, result.text);
   }
 
   // ─── Transport ────────────────────────────────────────────────────────────
@@ -380,6 +494,7 @@ export class QwenApiClient {
         signal: abortSignal,
       }),
       allowToolCalls,
+      () => this.stopStream(token, chatId).catch(() => undefined),
     );
   }
 
@@ -527,6 +642,14 @@ export class QwenApiClient {
   private async *parseSSE(
     chunkSource: AsyncIterable<string>,
     allowToolCalls: boolean,
+    /**
+     * Invoked when the loop is broken on purpose. Closing our reader only stops
+     * us listening — upstream keeps generating, and the next request in this
+     * chat is then refused with "The chat is in progress!". Awaited rather than
+     * fired off: the caller's next turn follows within milliseconds and would
+     * outrun it.
+     */
+    releaseChat?: () => Promise<void>,
   ): AsyncIterable<AIStreamChunk> {
     // The router catches ```tool_call``` markers with a sliding window and holds
     // a potential call back until the end of the stream.
@@ -681,7 +804,10 @@ export class QwenApiClient {
     };
 
     // Breaking out closes chunkSource: it cancels the reader for a direct
-    // response and stops the in-page fetch for the browser path.
+    // response and stops the in-page fetch for the browser path. Upstream is a
+    // separate matter — see releaseChat.
+    let cutEarly = false;
+
     for await (const piece of chunkSource) {
       buffer += piece;
       const lines = buffer.split("\n");
@@ -692,6 +818,7 @@ export class QwenApiClient {
 
       if (router.cut) {
         log("[qwen-api] transcript boundary detected — stopping stream");
+        cutEarly = true;
         break;
       }
 
@@ -699,6 +826,7 @@ export class QwenApiClient {
       // will ramble about a non-existent error. We do not need that tail.
       if (allowToolCalls && nativeToolCalls.length > 0) {
         log("[qwen-api] function_call recovered — stopping stream");
+        cutEarly = true;
         break;
       }
 
@@ -714,8 +842,13 @@ export class QwenApiClient {
         log(
           `[qwen-api] stream guard stop: no tool_call after ${fullText.length} chars`,
         );
+        cutEarly = true;
         break;
       }
+    }
+
+    if (cutEarly && releaseChat) {
+      await releaseChat();
     }
 
     if (buffer.trim()) {

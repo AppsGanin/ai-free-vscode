@@ -58,36 +58,9 @@ export class QwenProvider extends BaseAIProvider {
     }
 
     const key = conversationKey(params);
-    let chatId = params.chatId ?? this.chatIdByConversation.get(key);
-
-    if (!chatId) {
-      chatId = await this.apiClient.createChat(
-        token,
-        resolveModelId(params.model),
-      );
-      if (!chatId) {
-        throw new Error("Failed to create chat_id for Qwen");
-      }
-      this.chatIdByConversation.set(key, chatId);
-      log(`[${this.id}] created provider chat_id=${chatId}`);
-    }
-
-    // The client may move to a new chat_id (busy chat, drop, internal error);
-    // without updating the cache the next turn hits the dead chat again.
-    const rememberChatId = (newChatId: string) => {
-      this.chatIdByConversation.set(key, newChatId);
-      log(`[${this.id}] chat_id switched to ${newChatId}`);
-    };
 
     try {
-      yield* this.apiClient.sendMessageStream(
-        {
-          ...params,
-          chatId,
-        },
-        token,
-        rememberChatId,
-      );
+      yield* this.attempt(params, key, token);
     } catch (err) {
       if (!(err instanceof AuthExpiredError)) {
         throw err;
@@ -99,11 +72,7 @@ export class QwenProvider extends BaseAIProvider {
       if (refreshed) {
         log(`[${this.id}] token refreshed from live session, retrying request`);
         try {
-          yield* this.apiClient.sendMessageStream(
-            { ...params, chatId },
-            refreshed,
-            rememberChatId,
-          );
+          yield* this.attempt(params, key, refreshed);
           return;
         } catch (retryErr) {
           if (retryErr instanceof AuthExpiredError) {
@@ -116,6 +85,43 @@ export class QwenProvider extends BaseAIProvider {
       this._onDidAuthChange.fire();
       throw err;
     }
+  }
+
+  /**
+   * One whole attempt on a single Bearer: open a chat if there is none yet,
+   * then stream into it.
+   *
+   * Chat creation is part of the attempt on purpose. Qwen reports an expired
+   * token on `chats/new` just as readily as on the stream (HTTP 200 with
+   * `code: "unauthorized"`), and while this ran outside the caller's try the
+   * refresh never got a chance at the most common failure of the two.
+   */
+  private async *attempt(
+    params: AIRequestParams,
+    key: string,
+    token: string,
+  ): AsyncIterable<AIStreamChunk> {
+    let chatId = params.chatId ?? this.chatIdByConversation.get(key);
+
+    if (!chatId) {
+      chatId = await this.apiClient.createChat(
+        token,
+        resolveModelId(params.model),
+      );
+      this.chatIdByConversation.set(key, chatId);
+      log(`[${this.id}] created provider chat_id=${chatId}`);
+    }
+
+    yield* this.apiClient.sendMessageStream(
+      { ...params, chatId },
+      token,
+      // The client may move to a new chat_id (busy chat, drop, internal error);
+      // without updating the cache the next turn hits the dead chat again.
+      (newChatId: string) => {
+        this.chatIdByConversation.set(key, newChatId);
+        log(`[${this.id}] chat_id switched to ${newChatId}`);
+      },
+    );
   }
 
   /** Reads a fresh token from the live browser session; undefined if unchanged. */
