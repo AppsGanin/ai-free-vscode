@@ -49,6 +49,7 @@ dead entries that fail on use.
 
 | Model        | ID             | Context |
 | ------------ | -------------- | ------- |
+| Qwen3.8 Max  | `qwen3.8-max`  | 1M      |
 | Qwen3.7 Plus | `qwen3.7-plus` | 1M      |
 | Qwen3.7 Max  | `qwen3.7-max`  | 1M      |
 | Qwen3.6 Plus | `qwen3.6-plus` | 1M      |

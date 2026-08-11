@@ -19,6 +19,19 @@ const BASE = {
 export const QWEN_MODELS: AIModelInfo[] = [
   {
     ...BASE,
+    id: "qwen3.8-max",
+    name: "Qwen3.8 Max",
+    family: "Qwen3.8",
+    capabilities: {
+      toolCalling: true,
+      streaming: true,
+      imageInput: true,
+      thinking: true,
+      ...FEATURES,
+    },
+  },
+  {
+    ...BASE,
     id: "qwen3.7-plus",
     name: "Qwen3.7 Plus",
     family: "Qwen3.7",
@@ -71,6 +84,7 @@ export const QWEN_MODELS: AIModelInfo[] = [
 ];
 
 export const resolveModelId = aliasResolver({
+  "qwen3.8": "qwen3.8-max",
   "qwen3.7": "qwen3.7-max",
   "qwen3.6": "qwen3.6-plus",
   "qwen3.5": "qwen3.5-plus",
