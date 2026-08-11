@@ -224,6 +224,11 @@ instance, opts out of chat. The flags are
 independent: commit, suggestions and Quick Fix talk to the providers directly,
 so a model hidden from chat still works for them.
 
+Only models of providers you are signed into are ever picked. If the chosen one
+fails before it has produced any text, the request is retried against your other
+signed-in providers, one model each — so a provider that is rate-limited or has
+lost its session does not break the feature while another is available.
+
 ### Inline suggestions (ghost text)
 
 On-demand code completion at the cursor. It is **manual only** — it never fires

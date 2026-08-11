@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { log } from "../logger";
+import { errToString, log } from "../logger";
 import type { BaseAIProvider } from "../providers/BaseAIProvider";
 import type { AIModelInfo } from "../providers/types";
 import { promptSignIn } from "./util";
@@ -70,6 +70,9 @@ export function setFeatureBackend(
 /**
  * Model for a feature according to its `<section>.model` setting.
  * `auto` — or an unavailable model — falls back to the first available one.
+ *
+ * The result carries a retry chain: if the chosen backend fails outright, the
+ * request is repeated against the other signed-in providers.
  */
 export async function resolveFeatureModel(
   feature: ModelFeature,
@@ -81,15 +84,55 @@ export async function resolveFeatureModel(
   }
 
   const configured = configuredModelId(feature);
+  let primary = models[0];
   if (configured && configured.toLowerCase() !== AUTO) {
     const found = models.find((m) => matches(m, configured));
-    if (found) return toFeatureModel(found);
-    log(
-      `[${feature.logTag}] configured model "${configured}" is unavailable here, falling back to first of ${models.length}`,
-    );
+    if (found) primary = found;
+    else
+      log(
+        `[${feature.logTag}] configured model "${configured}" is unavailable here, falling back to first of ${models.length}`,
+      );
   }
 
-  return toFeatureModel(models[0]);
+  const chain = [primary, ...otherProviderModels(primary, models)];
+  if (chain.length > 1) {
+    log(
+      `[${feature.logTag}] backup providers: ${chain
+        .slice(1)
+        .map((m) => m.id)
+        .join(", ")}`,
+    );
+  }
+  return toFeatureModel(chain, feature);
+}
+
+/**
+ * `collectModels` namespaces every family as `<provider>/<family>`, so the tag
+ * in front is the sub-provider a model belongs to.
+ */
+function providerTagOf(model: AIModelInfo): string {
+  return model.family.split("/")[0];
+}
+
+/**
+ * The best model of each *other* signed-in provider, in list order. One per
+ * provider: a second model of a backend that just failed would fail the same
+ * way, so retrying it only adds latency.
+ */
+function otherProviderModels(
+  primary: AIModelInfo,
+  models: AIModelInfo[],
+): AIModelInfo[] {
+  const seen = new Set([providerTagOf(primary)]);
+  const backups: AIModelInfo[] = [];
+
+  for (const model of models) {
+    const tag = providerTagOf(model);
+    if (seen.has(tag)) continue;
+    seen.add(tag);
+    backups.push(model);
+  }
+  return backups;
 }
 
 /** QuickPick that writes the choice to `<section>.model` (Global). */
@@ -160,37 +203,60 @@ function matches(model: AIModelInfo, configured: string): boolean {
   );
 }
 
-function toFeatureModel(info: AIModelInfo): FeatureModel {
+/** @param chain the chosen model first, then one model per backup provider. */
+function toFeatureModel(
+  chain: AIModelInfo[],
+  feature: ModelFeature,
+): FeatureModel {
   const { provider, secrets } = backend!;
+  const [info] = chain;
 
   return {
     id: info.id,
     name: info.name,
     family: info.family,
     async *sendText(prompts, options, token) {
-      const abort = new AbortController();
-      const cancelled = token.onCancellationRequested(() => abort.abort());
+      const messages = prompts.map((text) => ({
+        role: "user" as const,
+        content: text,
+      }));
 
-      try {
-        const stream = provider.sendMessageStream(
-          {
-            model: info.id,
-            messages: prompts.map((text) => ({
-              role: "user" as const,
-              content: text,
-            })),
-            toolMode: "none",
-            thinkingMode: options.thinkingMode,
-            abortSignal: abort.signal,
-          },
-          secrets,
-        );
+      for (let index = 0; index < chain.length; index++) {
+        const candidate = chain[index];
+        const abort = new AbortController();
+        const cancelled = token.onCancellationRequested(() => abort.abort());
+        // Callers render chunks as they arrive, so once anything is out a
+        // second backend would append to a half-written answer.
+        let yielded = false;
 
-        for await (const chunk of stream) {
-          if (chunk.type === "text") yield chunk.content;
+        try {
+          const stream = provider.sendMessageStream(
+            {
+              model: candidate.id,
+              messages,
+              toolMode: "none",
+              thinkingMode: options.thinkingMode,
+              abortSignal: abort.signal,
+            },
+            secrets,
+          );
+
+          for await (const chunk of stream) {
+            if (chunk.type === "text") {
+              yielded = true;
+              yield chunk.content;
+            }
+          }
+          return;
+        } catch (err) {
+          const next = chain[index + 1];
+          if (yielded || !next || token.isCancellationRequested) throw err;
+          log(
+            `[${feature.logTag}] ${candidate.id} failed (${errToString(err)}) — retrying on ${next.id}`,
+          );
+        } finally {
+          cancelled.dispose();
         }
-      } finally {
-        cancelled.dispose();
       }
     },
   };

@@ -148,7 +148,9 @@ async function generateCommitMessage(scmArg?: unknown): Promise<void> {
   await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.SourceControl,
-      title: `Generating commit message (${model.name})…`,
+      // No model name: the request can switch to a backup provider mid-flight,
+      // and a title fixed at the start would name the wrong one.
+      title: "Generating commit message…",
       cancellable: true,
     },
     async (_progress, token) => {

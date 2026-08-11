@@ -131,7 +131,8 @@ async function fixProblem(
   const fixed = await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
-      title: `Fixing problem (${model.name})…`,
+      // See CommitMessageGenerator: the backend may change mid-request.
+      title: "Fixing problem…",
       cancellable: true,
     },
     async (_progress, token): Promise<string | undefined> => {
