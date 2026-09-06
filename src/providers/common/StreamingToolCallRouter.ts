@@ -96,12 +96,16 @@ function scanFences(text: string, state: FenceState): FenceState {
 const STRAY_CLOSE_TAGS = [
   "</tool_call>",
   "</function>",
+  "</function_calls>",
+  "</invoke>",
   "</parameter>",
   "</tool_name>",
   "</tool_arguments>",
 ];
+// The namespace prefix is optional throughout: DeepSeek emits the Anthropic
+// dialect both bare and namespaced.
 const STRAY_CLOSE_TAG_RE =
-  /<\/(?:tool_call|function|parameter|tool_name|tool_arguments)>[ \t]*\n?/gi;
+  /<\/(?:[\w-]+:)?(?:tool_call|function_calls|function|invoke|parameter|tool_name|tool_arguments)>[ \t]*\n?/gi;
 
 /** Length of a tail that looks like the start of a closing tag (`<`, `</too`…). */
 function trailingCloseTagPrefixLen(text: string): number {
@@ -127,7 +131,13 @@ export function stripDanglingToolCallMarkers(text: string): string {
       // Orphaned MiMo/Qwen-Coder XML tags: the model regularly loses one side.
       .replace(/<tool_call\b[^>]*>|<\/tool_call>/gi, "")
       .replace(/<function\s*=\s*[\w.:-]+\s*>|<\/function>/gi, "")
-      .replace(/<parameter\s*=\s*[\w.:-]+\s*>|<\/parameter>/gi, "")
+      // Anthropic dialect, opening and closing halves alike.
+      .replace(/<\/?(?:[\w-]+:)?function_calls>/gi, "")
+      .replace(/<(?:[\w-]+:)?invoke\b[^>]*>|<\/(?:[\w-]+:)?invoke>/gi, "")
+      .replace(
+        /<parameter\s*=\s*[\w.:-]+\s*>|<(?:[\w-]+:)?parameter\b[^>]*>|<\/(?:[\w-]+:)?parameter>/gi,
+        "",
+      )
       .replace(/<\/?tool_name>|<\/?tool_arguments>/gi, "")
       .trim()
   );
@@ -146,6 +156,14 @@ function sanitizeHoldRemainder(text: string): string {
       // so nothing else would recognise them as protocol. Closing tag optional.
       .replace(/<tool_call\b[^>]*>[\s\S]*?(?:<\/tool_call>|$)/gi, "\n\n")
       .replace(/<function\s*=\s*[\w.:-]+\s*>[\s\S]*?<\/function>/gi, "\n\n")
+      .replace(
+        /<(?:[\w-]+:)?function_calls>[\s\S]*?(?:<\/(?:[\w-]+:)?function_calls>|$)/gi,
+        "\n\n",
+      )
+      .replace(
+        /<(?:[\w-]+:)?invoke\b[^>]*>[\s\S]*?(?:<\/(?:[\w-]+:)?invoke>|$)/gi,
+        "\n\n",
+      )
       .replace(
         /<tool_name>[\s\S]*?<\/tool_name>(\s*<tool_arguments>[\s\S]*?<\/tool_arguments>)?/gi,
         "\n\n",

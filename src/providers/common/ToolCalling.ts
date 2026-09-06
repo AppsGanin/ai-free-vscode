@@ -16,6 +16,10 @@ const TOOL_CALL_MARKERS = [
   "<function=",
   // MiMo variant: <tool_name>name</tool_name><tool_arguments>{…}
   "<tool_name>",
+  // Anthropic-style XML, which DeepSeek reproduces from its training data:
+  // <function_calls><invoke name="read_file"><parameter name="path">…
+  "<function_calls>",
+  "<invoke",
 ];
 
 // Shortest partial marker prefix we accept, so a plain ``` fence is not held.
@@ -62,6 +66,10 @@ export function findToolCallMarkerStart(text: string): number {
     }
   }
 
+  // Same dialect carrying a namespace prefix (`<ns:invoke …>`), which no
+  // literal above can match. No partial-tail form: the bare markers cover the
+  // split-chunk case, and a lone `<` is far too common to hold on.
+  take(INVOKE_MARKER_RE.exec(text)?.index ?? -1);
   take(JSON_START_RE.exec(text)?.index ?? -1);
   take(ENVELOPE_START_RE.exec(text)?.index ?? -1);
   take(JSON_PARTIAL_TAIL_RE.exec(text)?.index ?? -1);
@@ -119,6 +127,7 @@ function skipSpaceBack(text: string, from: number): number {
 export function looksLikeToolCallStart(text: string): boolean {
   return (
     /```tool_call|<tool_call|<function\s*=|<tool_name>/i.test(text) ||
+    INVOKE_PROTOCOL_RE.test(text) ||
     /"(?:tool_call|tool_calls|tool_use|function_call)"\s*:/i.test(text) ||
     /"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:/.test(text) ||
     /"(?:arguments|parameters|params|input|args)"\s*:\s*\{/.test(text)
@@ -217,6 +226,7 @@ export function buildToolsSystemPrompt(tools: AIToolDefinition[]): string {
     "The object has exactly two keys — `name` and `arguments`:",
     '- Every parameter goes INSIDE `arguments`. Never next to `name`: {"name":"read_file","filePath":"…"} is wrong.',
     '- Never wrap the object in another one: {"tool_call":{…}} and {"function":{…}} are wrong.',
+    '- Never use XML/Anthropic call syntax: <invoke name="…">, <parameter name="…"> and <function_calls> are wrong.',
     "",
     "JSON validity is CRITICAL — a malformed call is dropped:",
     '- Every string value MUST be valid JSON: escape " as \\", newlines as \\n, backslashes as \\\\, tabs as \\t.',
@@ -245,6 +255,7 @@ const PARSERS: Array<{
   label: string;
   parse: (text: string) => AIStreamChunk[];
 }> = [
+  { label: "invoke tag", parse: parseInvokeTagCalls },
   { label: "tool_call attribute", parse: parseAttributeTagCalls },
   { label: "xml function", parse: parseXmlFunctionCalls },
   { label: "tool_name/tool_arguments", parse: parseTagPairCalls },
@@ -573,6 +584,50 @@ function parseXmlFunctionCalls(text: string): AIStreamChunk[] {
   return calls;
 }
 
+// Anthropic-style XML: a name attribute on `<invoke>`, one tag per parameter,
+// optionally wrapped in `<function_calls>` and optionally namespaced:
+//   <function_calls>
+//   <invoke name="read_file">
+//   <parameter name="filePath">/a/b.ts</parameter>
+//   </invoke>
+//   </function_calls>
+// DeepSeek falls back to this dialect no matter what the system prompt asks
+// for, so it is parsed rather than fought. Closing tags stay optional, as
+// everywhere else here — a block runs to the next tag or to the end.
+const NS = "(?:[\\w-]+:)?";
+const INVOKE_RE = new RegExp(
+  `<${NS}invoke\\s+name\\s*=\\s*["']?([\\w.:-]+)["']?\\s*>([\\s\\S]*?)` +
+    `(?=</${NS}invoke>|<${NS}invoke\\b|</${NS}function_calls>|$)`,
+  "gi",
+);
+const XML_PARAMETER_ATTR_RE = new RegExp(
+  `<${NS}parameter\\s+name\\s*=\\s*["']?([\\w.:-]+)["']?\\s*>([\\s\\S]*?)` +
+    `(?=</${NS}parameter>|<${NS}parameter\\b|</${NS}invoke>|</${NS}function_calls>|$)`,
+  "gi",
+);
+/** A hold that is this dialect rather than prose that merely says "<invoke". */
+const INVOKE_PROTOCOL_RE = new RegExp(
+  `<${NS}function_calls>|<${NS}invoke\\s+name\\s*=`,
+  "i",
+);
+const INVOKE_MARKER_RE = new RegExp(`<${NS}(?:invoke|function_calls)\\b`, "i");
+
+function parseInvokeTagCalls(text: string): AIStreamChunk[] {
+  const calls: AIStreamChunk[] = [];
+  for (const match of text.matchAll(INVOKE_RE)) {
+    const name = match[1]?.trim();
+    if (name) {
+      calls.push(
+        createToolCallChunk({
+          name,
+          argumentsValue: parseXmlParameters(match[2] ?? ""),
+        }),
+      );
+    }
+  }
+  return calls;
+}
+
 // Second MiMo variant: name and arguments in separate tags. The arguments block
 // is optional (calls without parameters) and often left unclosed.
 const TAG_TOOL_NAME_RE =
@@ -627,9 +682,13 @@ function parseArgumentsBlock(raw: string): Record<string, unknown> {
 
 function parseXmlParameters(body: string): Record<string, unknown> {
   const args: Record<string, unknown> = {};
-  for (const param of body.matchAll(XML_PARAMETER_RE)) {
-    const key = param[1]?.trim();
-    if (key) args[key] = coerceValue(param[2] ?? "", true);
+  // `<parameter=key>` and `<parameter name="key">` — models mix both freely,
+  // sometimes inside a single call.
+  for (const pattern of [XML_PARAMETER_RE, XML_PARAMETER_ATTR_RE]) {
+    for (const param of body.matchAll(pattern)) {
+      const key = param[1]?.trim();
+      if (key) args[key] = coerceValue(param[2] ?? "", true);
+    }
   }
   return args;
 }

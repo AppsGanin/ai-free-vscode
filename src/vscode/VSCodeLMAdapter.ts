@@ -8,7 +8,11 @@ import {
   stripToolCallBlocks,
   summarizeToolCalls,
 } from "../providers/common/ToolCalling";
-import type { AIMessage, AIStreamChunk } from "../providers/types";
+import type {
+  AIMessage,
+  AIStreamChunk,
+  AIToolDefinition,
+} from "../providers/types";
 import { vsCodeMessageToAI } from "../providers/types";
 
 // Light buffering: smoother rendering, and a chance to look ahead before
@@ -252,6 +256,7 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
       const input = normalizeToolArguments(
         name,
         tryParseJsonObject(args) ?? {},
+        tools,
       );
       progress.report(
         new vscode.LanguageModelToolCallPart(callId, name, input),
@@ -425,8 +430,10 @@ function tryParseJsonObject(text: string): Record<string, unknown> | undefined {
 /** read_file is the one tool models routinely call with a broken line range. */
 function normalizeToolArguments(
   toolName: string,
-  args: Record<string, unknown>,
+  rawArgs: Record<string, unknown>,
+  tools?: readonly AIToolDefinition[],
 ): Record<string, unknown> {
+  const args = retypeAgainstSchema(toolName, rawArgs, tools);
   if (toolName !== "read_file") return args;
 
   const toNumber = (value: unknown): number | undefined => {
@@ -444,6 +451,90 @@ function normalizeToolArguments(
       : startLine + 1999;
 
   return { ...args, startLine, endLine };
+}
+
+/**
+ * Re-types arguments against the schema the tool declared.
+ *
+ * The XML call dialects carry no types — `<parameter name="query">2024</…>` is
+ * just text — so the parser has to guess, and it turns a path named `123` or a
+ * query of `true` into a number or a boolean. VS Code validates the input
+ * against the tool schema and drops the call. Only conversions the schema
+ * actually asks for are applied; a parameter the tool did not declare is left
+ * exactly as it arrived.
+ */
+function retypeAgainstSchema(
+  toolName: string,
+  args: Record<string, unknown>,
+  tools?: readonly AIToolDefinition[],
+): Record<string, unknown> {
+  const properties = (
+    tools?.find((t) => t.name === toolName)?.parameters as
+      | { properties?: Record<string, unknown> }
+      | undefined
+  )?.properties;
+  if (!properties) return args;
+
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) {
+    result[key] = coerceToSchemaType(value, declaredType(properties[key]));
+  }
+  return result;
+}
+
+/** First concrete type of a property, through `type: ["string","null"]` unions. */
+function declaredType(property: unknown): string | undefined {
+  const type = (property as { type?: unknown } | undefined)?.type;
+  if (typeof type === "string") return type;
+  if (Array.isArray(type)) {
+    return type.find((t): t is string => typeof t === "string" && t !== "null");
+  }
+  return undefined;
+}
+
+function coerceToSchemaType(value: unknown, type: string | undefined): unknown {
+  if (type === undefined || value === null || value === undefined) return value;
+
+  if (type === "string") {
+    // Only the parser's own guesses are undone. An object stringified here
+    // would hide a real mismatch behind "[object Object]".
+    return typeof value === "number" || typeof value === "boolean"
+      ? String(value)
+      : value;
+  }
+
+  if (typeof value !== "string") return value;
+
+  if (type === "number" || type === "integer") {
+    const parsed = Number(value.trim());
+    if (value.trim() === "" || !Number.isFinite(parsed)) return value;
+    return type === "integer" ? Math.trunc(parsed) : parsed;
+  }
+
+  if (type === "boolean") {
+    const lower = value.trim().toLowerCase();
+    if (lower === "true") return true;
+    if (lower === "false") return false;
+    return value;
+  }
+
+  if (type === "array" || type === "object") {
+    if (!/^\s*[[{]/.test(value)) return value;
+    try {
+      const parsed: unknown = JSON.parse(value);
+      const matches =
+        type === "array"
+          ? Array.isArray(parsed)
+          : typeof parsed === "object" &&
+            parsed !== null &&
+            !Array.isArray(parsed);
+      return matches ? parsed : value;
+    } catch {
+      return value;
+    }
+  }
+
+  return value;
 }
 
 /**
