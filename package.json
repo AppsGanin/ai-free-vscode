@@ -51,6 +51,10 @@
         "title": "AI Free VSCode — Status"
       },
       {
+        "command": "free-ai-vscode.copyDebugReport",
+        "title": "AI Free VSCode — Copy Debug Report (for a GitHub issue)"
+      },
+      {
         "command": "free-ai-vscode.manage",
         "title": "AI Free VSCode — Manage Account"
       },
@@ -203,7 +207,7 @@
             "type": "boolean",
             "default": false,
             "order": 2,
-            "description": "Verbose DEBUG logs in the 'AI Free VSCode' output channel (auth flow, requests, streaming)."
+            "markdownDescription": "Verbose DEBUG logs in the 'AI Free VSCode' output channel (auth flow, requests, streaming, raw model output). To report a problem: turn this on, reproduce it, then run **AI Free VSCode — Copy Debug Report** and paste the result into a GitHub issue. Tokens, cookies and e-mails are masked."
           }
         }
       },
@@ -290,11 +294,33 @@
             "markdownDescription": "How the Qwen anti-bot (WAF) fallback browser runs. Changing this needs a window reload.",
             "order": 1
           },
+          "freeAI.zai.browserMode": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "headed",
+              "headless"
+            ],
+            "enumDescriptions": [
+              "Try a hidden headless browser first, and automatically fall back to a minimized visible window only if the Z.ai anti-bot blocks it (recommended)",
+              "Always use a real (minimized) browser window — most reliable against the anti-bot, but a window is created",
+              "Always headless with no window and no fallback — no window ever, but the anti-bot may block requests"
+            ],
+            "default": "auto",
+            "markdownDescription": "How the Z.ai anti-bot (WAF) bridge browser runs. Changing this needs a window reload.",
+            "order": 2
+          },
           "freeAI.playwright.timeout": {
             "type": "number",
             "default": 120000,
-            "order": 2,
+            "order": 3,
             "description": "Browser sign-in timeout, in milliseconds."
+          },
+          "freeAI.proxy": {
+            "type": "string",
+            "default": "",
+            "order": 3,
+            "markdownDescription": "Proxy for the browser windows the extension opens (sign-in, the Qwen and Z.ai bridges): `http://host:port`, `http://user:pass@host:port` or `socks5://host:port`. Empty uses VS Code's `#http.proxy#`. Requests made directly by the extension always follow `#http.proxy#`, so setting only that covers everything. Takes effect for newly opened browser windows (reload the window to apply to a running bridge)."
           }
         }
       }
@@ -313,14 +339,18 @@
     "compile": "tsc --noEmit",
     "bundle": "node esbuild.js",
     "watch": "node esbuild.js --watch",
-    "package": "vsce package"
+    "package": "vsce package",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:live": "LIVE=1 vitest run"
   },
   "devDependencies": {
     "@types/node": "^20.19.41",
     "@types/vscode": "^1.105.0",
-    "@vscode/vsce": "^3.0.0",
+    "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.25.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.7"
   },
   "dependencies": {
     "playwright": "^1.52.0"

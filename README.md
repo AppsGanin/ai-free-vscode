@@ -11,6 +11,8 @@
 
 > Use free AI models directly in Copilot Chat without API keys, billing, or token counting.
 
+> ⚠️ **Read before use.** This is not an official API: the extension drives the providers' regular web chats. Your account **can be banned or rate-limited — temporarily or permanently** — and any provider may work unstably or stop working at any time. See [Important notice](#important-notice).
+
 **AI Free VSCode** connects free web-based models through a Playwright browser session and registers them as a Copilot Chat provider.
 
 ## What it does
@@ -68,11 +70,23 @@ dead entries that fail on use.
 | --------- | ----------- | ------- |
 | Kimi K2.5 | `kimi-k2.5` | 128K    |
 
-> ⚠️ **Kimi is kept out of Copilot Chat** (`chat: false`). Given tools it
-> ignores the text tool-call protocol and falls back to its built-in `ipython`
-> code interpreter, running a server-side agent loop we cannot feed results to —
-> slow (often minutes) and unreliable. It stays available for commit messages,
-> inline suggestions and Quick Fix, where no tools are involved.
+> ⚠️ **Kimi is kept out of Copilot Chat** (`chat: false`). Short tool
+> sessions work, but once the context grows K2.5 escapes into its own
+> server-side code interpreter: it recreates the project in Kimi's sandbox,
+> "fixes" it there and reports success while nothing changed in your
+> workspace (seen in the agent test: 33 hidden `ipython` calls in one turn).
+> It stays available for commit messages, inline suggestions and Quick Fix,
+> where no tools are involved.
+
+
+### Z.ai
+
+| Model         | ID              | Context |
+| ------------- | --------------- | ------- |
+| GLM-5.3       | `glm-5.3`       | 128K    |
+| GLM-5.2       | `glm-5.2`       | 128K    |
+| GLM-5.3 Flash | `glm-5.3-flash` | 128K    |
+| GLM-4.7       | `glm-4.7`       | 128K    |
 
 ### Your own OpenAI-compatible endpoints
 
@@ -162,6 +176,24 @@ You normally don't need to touch this, but you can pin the browser mode in
 > frequently, so a blocked Qwen request may still occasionally surface — retrying
 > usually clears it.
 
+### Z.ai and the browser bridge
+
+`chat.z.ai` signs each completion request inside its own web app and runs an
+invisible captcha before it. So Z.ai has no direct client at all: every message
+is typed into the real chat page, in a Chrome window kept minimized off-screen,
+and the page sends it itself. The answer is copied from the page's own stream
+back to VS Code as it arrives; the model and thinking mode are set on the
+outgoing request.
+
+- The window uses the profile created at sign-in
+  (`~/.ai-free-vscode/zai-browser-profile`), so no extra login is needed.
+- Each request is a throwaway chat, deleted afterwards — your chat.z.ai
+  history stays clean.
+- If the captcha ever turns interactive, the window is brought to the front
+  with a notification. Complete it there — the request continues by itself.
+- Requests are sent one at a time, and each opens a fresh chat page, so a
+  reply starts a couple of seconds later than with the other providers.
+
 ## Installation
 
 ### From the VS Code Marketplace (recommended)
@@ -219,8 +251,7 @@ straight into the commit input box.
 - Pick a model quickly: command `AI Free VSCode — Change Commit Model`
 
 Every model declares which features it is fit for — `chat`, `commit`,
-`suggestions`, `fix` — and each picker lists only the fit ones. Kimi, for
-instance, opts out of chat. The flags are
+`suggestions`, `fix` — and each picker lists only the fit ones. The flags are
 independent: commit, suggestions and Quick Fix talk to the providers directly,
 so a model hidden from chat still works for them.
 
@@ -273,6 +304,9 @@ Everything below is also editable on one page: **`AI Free VSCode — Open Settin
 | `freeAI.custom.providers`           | `[]`     | Your own OpenAI-compatible endpoints (keys live in SecretStorage) |
 | `freeAI.playwright.timeout`         | `120000` | Browser sign-in timeout in milliseconds                           |
 | `freeAI.qwen.browserMode`           | `auto`   | Qwen anti-bot fallback browser: `auto` / `headed` / `headless`    |
+| `freeAI.zai.browserMode`            | `auto`   | Z.ai bridge browser: `auto` / `headed` / `headless`               |
+| `freeAI.proxy`                      | —        | Proxy for the extension's browser windows (see below)             |
+| `freeAI.debug`                      | `false`  | Verbose DEBUG logs in the output channel (see below)              |
 | `freeAI.commit.enabled`             | `true`   | Show the ✨ commit message generation button in Source Control    |
 | `freeAI.commit.model`               | `auto`   | Model for commit messages (`auto` = first available)              |
 | `freeAI.commit.prompt`              | —        | Instruction prepended to the diff for commit generation           |
@@ -286,6 +320,33 @@ Everything below is also editable on one page: **`AI Free VSCode — Open Settin
 Thinking (reasoning) is automatic: enabled in plain chat, disabled when tools are
 active (reasoning is unreliable with tool calling on these backends).
 
+### Proxy
+
+Requests the extension makes itself already follow VS Code's `http.proxy` (and
+`http.noProxy`). The browser windows — sign-in and the Qwen / Z.ai bridges —
+run as a separate Chrome process and take the same proxy too, so setting
+`http.proxy` alone covers everything. `freeAI.proxy` overrides it for the
+browsers only, e.g. for a SOCKS proxy: `http://host:port`,
+`http://user:pass@host:port` or `socks5://host:port`. A change applies to
+newly opened browser windows; reload VS Code to apply it to a running bridge.
+
+### Reporting a problem
+
+1. Turn on `freeAI.debug` (**Verbose debug logs** on the settings page).
+2. Reproduce the problem.
+3. Run **`AI Free VSCode — Copy Debug Report`** (or the button next to the
+   checkbox) and paste the result into a
+   [GitHub issue](https://github.com/AppsGanin/ai-free-vscode/issues/new),
+   together with what you did and what you expected.
+
+The report holds your VS Code / OS / extension versions, the relevant settings,
+which providers are signed in, and the recent log: every chat request with its
+own `[#id]`, timings, HTTP statuses, the browser that was launched, errors with
+their stack, and an excerpt of the model's raw output. Tokens, cookies, keys,
+proxy passwords and e-mail addresses are masked automatically, but the log can
+contain fragments of your prompts and the model's answers — skim it before
+posting.
+
 ## Development
 
 ```bash
@@ -297,6 +358,51 @@ npx playwright install chromium
 ```
 
 Run the extension in VS Code with `F5`.
+
+### Tests
+
+```bash
+npm test            # offline: parsers, adapter, every provider client (~1 s)
+npm run test:live   # real requests to Qwen, DeepSeek, Kimi and Z.ai
+```
+
+**Offline tests** (`test/`) need no network or accounts. Each provider client
+is fed canned upstream streams through a stubbed `fetch` (Z.ai through a fake
+browser bridge), split into small pieces the way real streams arrive. They
+cover the tool-call dialects, text/reasoning separation, error mapping, the
+order of parts the chat UI receives, and argument re-typing against tool
+schemas.
+
+**Live tests** (`test/live/`) send real requests through the same path a chat
+takes (adapter → provider → upstream) and catch what canned data cannot: a
+changed stream format, a new anti-bot step, a model that stopped following the
+tool protocol. They read each provider's session from its browser profile in
+`~/.ai-free-vscode/`, so:
+
+- a provider that is not signed in opens a browser window on its sign-in
+  page and the run waits for you (5 min; `LIVE_LOGIN_TIMEOUT=600` for longer,
+  never on CI) — or sign in through the extension beforehand;
+- close the VS Code dev host — Chrome lets one process hold a profile, and a
+  locked profile is skipped with the reason.
+
+`test/live/agent.test.ts` runs a **full agent session** per model: a small
+project with planted bugs and a six-part task (run tests, fix the code, add a
+function and its test, update the README), worked through with Copilot's own
+tools for dozens of steps. It passes only if the project really ends up
+correct — tests green, the new function right, the original tests untouched —
+and every tool call along the way matched its schema. A step-by-step
+transcript of each run lands in `test/live/.reports/`.
+
+```bash
+npm run test:live -- test/live/agent.test.ts          # every provider (~10–30 min)
+npm run test:live -- test/live/agent.test.ts -t qwen  # one provider
+```
+
+A provider that is overloaded on its side ("at capacity", rate limits) marks
+the affected test skipped with that reason rather than failed, so a red live
+run always points at something in this repository. The Z.ai bridge tests run
+in a throwaway guest profile and answer the completion endpoint themselves, so
+they need no account and cost no model calls.
 
 ### Enabling/disabling providers at build time
 
@@ -316,7 +422,7 @@ PROVIDER_QWEN=false PROVIDER_KIMI=false npm run bundle
 PROVIDER_QWEN=false npm run bundle && npm run package
 ```
 
-Provider keys: `qwen`, `deepseek`, `kimi`. Adding a new provider means
+Provider keys: `qwen`, `deepseek`, `kimi`, `zai`. Adding a new provider means
 registering its key in [`src/providers/providerConfig.ts`](src/providers/providerConfig.ts),
 [`esbuild.js`](esbuild.js), and the factory map in [`src/extension.ts`](src/extension.ts).
 
@@ -327,7 +433,11 @@ registering its key in [`src/providers/providerConfig.ts`](src/providers/provide
 
 ## Important notice
 
-This is an unofficial extension. Authentication is handled through a browser session, and the integration may break if providers change their web APIs or terms.
+This is an unofficial extension. Authentication is handled through a browser session, and none of the providers offers this as an API — the extension automates their regular web chats.
+
+- **Account bans.** Providers can detect automated use and restrict your account or IP: a temporary block (a captcha, a pause of several minutes or hours, "too many requests") or a **permanent ban**. Use an account you can afford to lose, and avoid bursts of requests.
+- **Instability.** Because this is not a real API, every provider may work unstably: slow or empty answers, captchas, expired sessions, or sudden breakage when a site changes its web app, anti-bot rules or terms. A fix may take a while, and some models may disappear.
+- **No guarantees.** Availability, speed and quality are decided by the providers, not by this extension.
 
 > Use at your own risk. Web session automation may violate provider policies.
 

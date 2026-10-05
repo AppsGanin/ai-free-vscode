@@ -22,7 +22,16 @@ const PARALLEL_LIMIT_RETRY_DELAYS_MS = [1500, 4000];
  * turns over a window rather than concurrency, so it needs a real pause — the
  * sub-second backoff a busy generation slot gets would just burn the retries.
  */
-const RATE_LIMIT_RETRY_DELAYS_MS = [3000, 8000, 18000];
+// The window is about a minute: an agent firing ten turns in twenty seconds
+// stayed throttled through 29 s of retries. Nearly two minutes in total now.
+const RATE_LIMIT_RETRY_DELAYS_MS = [5000, 15000, 30000, 60000];
+
+/**
+ * After a throttle, turns are spaced out for a while so the next burst does
+ * not run straight back into it. Before one, requests go at full speed.
+ */
+const THROTTLED_MIN_INTERVAL_MS = 6000;
+const THROTTLED_PACING_MS = 5 * 60_000;
 
 /** Longest `Retry-After` worth honouring before giving the error to the user. */
 const MAX_RETRY_AFTER_MS = 30000;
@@ -93,6 +102,10 @@ export class DeepSeekProvider extends BaseAIProvider {
    */
   private queue: Promise<unknown> = Promise.resolve();
 
+  /** When the last request went out, and until when to space them out. */
+  private lastRequestAt = 0;
+  private paceUntil = 0;
+
   /**
    * Session creation happens before the streaming recovery ladder can help, so
    * it carries its own retry: the TLS handshake to chat.deepseek.com gets reset
@@ -124,6 +137,19 @@ export class DeepSeekProvider extends BaseAIProvider {
     }
 
     throw lastError;
+  }
+
+  /** Spaces requests out while the account was recently throttled. */
+  private async pace(signal?: AbortSignal): Promise<void> {
+    const now = Date.now();
+    if (now < this.paceUntil) {
+      const wait = this.lastRequestAt + THROTTLED_MIN_INTERVAL_MS - now;
+      if (wait > 0 && !signal?.aborted) {
+        log(`[${this.id}] recently throttled — spacing requests (${wait}ms)`);
+        await delay(wait);
+      }
+    }
+    this.lastRequestAt = Date.now();
   }
 
   private async acquireSlot(): Promise<() => void> {
@@ -218,6 +244,7 @@ export class DeepSeekProvider extends BaseAIProvider {
       this: DeepSeekProvider,
       attempt: Attempt,
     ): AsyncIterable<AIStreamChunk> {
+      await this.pace(params.abortSignal);
       let lastMessageId = attempt.parentId;
       let produced = false;
       let answerChars = 0;
@@ -359,6 +386,7 @@ export class DeepSeekProvider extends BaseAIProvider {
       // Checked before the slot limit: both mean "come back later", but only
       // this one is counted per account over a window rather than per request.
       if (isRateLimited(error)) {
+        this.paceUntil = Date.now() + THROTTLED_PACING_MS;
         const hinted =
           error instanceof RateLimitError && error.retryAfterMs
             ? Math.min(error.retryAfterMs, MAX_RETRY_AFTER_MS)

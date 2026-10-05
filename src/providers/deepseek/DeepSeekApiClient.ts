@@ -551,6 +551,24 @@ function extractDelta(
       if (id !== null) messageId = id;
     }
 
+    // The opening snapshot already lists fragments — with reasoning on, the
+    // first is a THINK one: `{"v":{"response":{…,"fragments":[{"type":"THINK",
+    // "content":"We"}]}}}`. Its type must be registered like an appended
+    // fragment's: the `response/fragments/-1/content` patches that follow
+    // resolve against this list, and an empty one made the whole reasoning
+    // leak into the answer.
+    if (Array.isArray(obj.fragments)) {
+      state.fragmentTargets = obj.fragments.map((fragment) =>
+        THINK_TYPE_RE.test(
+          String((fragment as { type?: unknown } | null)?.type ?? ""),
+        )
+          ? "thinking"
+          : "text",
+      );
+      const last = state.fragmentTargets[state.fragmentTargets.length - 1];
+      if (last) state.lastTarget = last;
+    }
+
     // Abbreviated patch `{"v":"…"}` with no path: continues the previous APPEND.
     // Happens at any depth (inside BATCH too), hence no path check.
     if (Object.keys(obj).length === 1 && typeof obj.v === "string") {

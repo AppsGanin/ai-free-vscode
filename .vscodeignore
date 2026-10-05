@@ -21,3 +21,5 @@ tsconfig.json
 
 # Демо-гифки — нужны только для README на GitHub, не для пакета расширения
 media/*.gif
+test/**
+vitest.config.ts

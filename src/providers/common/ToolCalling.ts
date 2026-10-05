@@ -196,9 +196,17 @@ export function buildToolsSystemPrompt(tools: AIToolDefinition[]): string {
       properties?: Record<string, unknown>;
       required?: unknown;
     };
+    const entries = Object.entries(params?.properties ?? {}).slice(0, 8);
+    const types = Object.fromEntries(
+      entries.flatMap(([key, schema]) => {
+        const type = argType(schema);
+        return type ? [[key, type]] : [];
+      }),
+    );
     return {
       name: t.name,
-      args: Object.keys(params?.properties ?? {}).slice(0, 8),
+      args: entries.map(([key]) => key),
+      ...(Object.keys(types).length > 0 ? { types } : {}),
       required: Array.isArray(params.required)
         ? params.required.slice(0, 8)
         : [],
@@ -243,9 +251,39 @@ export function buildToolsSystemPrompt(tools: AIToolDefinition[]): string {
     "",
     "After tool result is returned, continue normally.",
     "",
+    "`types` gives the JSON type of every argument that is not a string; arguments not listed there are strings.",
+    '`x[]` means a JSON array — e.g. "view_range":[1,180], never "1-180" or "1:180".',
+    "",
     "Available tools (compact):",
     JSON.stringify(compactTools, null, 2),
   ].join("\n");
+}
+
+/**
+ * JSON type of an argument for the prompt (`integer[]`, `boolean`, …), or
+ * undefined for strings. Without it the model guesses, and writes ranges as
+ * "1-180" where the tool takes [1, 180]; VS Code then rejects the call.
+ * Strings are left out to keep the prompt small (a hundred-odd tools), and the
+ * types sit apart from `args` so a name is never mistaken for `name:type`.
+ */
+function argType(schema: unknown): string | undefined {
+  const type = jsonType(schema);
+  if (!type || type === "string") return undefined;
+  if (type === "array") {
+    const items = jsonType((schema as { items?: unknown }).items);
+    return `${items ?? "any"}[]`;
+  }
+  return type;
+}
+
+/** First concrete type of a schema, through `["string","null"]` unions. */
+function jsonType(schema: unknown): string | undefined {
+  const type = (schema as { type?: unknown } | undefined)?.type;
+  if (typeof type === "string") return type;
+  if (Array.isArray(type)) {
+    return type.find((t): t is string => typeof t === "string" && t !== "null");
+  }
+  return undefined;
 }
 
 /**
@@ -300,14 +338,15 @@ export function* parseToolCallsFromText(
     );
 
   const tagged = parseTaggedCalls(text);
-  if (tagged.calls.length > 0) {
-    log(tagged.calls, "<tool_call>");
-    yield* tagged.calls;
+  const taggedCalls = withoutPlaceholders(tagged.calls, options);
+  if (taggedCalls.length > 0) {
+    log(taggedCalls, "<tool_call>");
+    yield* taggedCalls;
     return;
   }
 
   for (const { label, parse } of PARSERS) {
-    const calls = parse(text);
+    const calls = withoutPlaceholders(parse(text), options);
     if (calls.length === 0) continue;
     log(calls, label);
     yield* calls;
@@ -317,6 +356,27 @@ export function* parseToolCallsFromText(
   if (tagged.text.trim()) {
     yield { type: "text", content: tagged.text.trimEnd() };
   }
+}
+
+/**
+ * Drops the format example from our own system prompt
+ * (`{"name":"tool_name","arguments":{"param":"value"}}`). Long-context models
+ * echo it back verbatim, and it used to reach VS Code as a call to a tool named
+ * `tool_name`.
+ */
+function withoutPlaceholders(
+  calls: AIStreamChunk[],
+  options?: ToolCallParseOptions,
+): AIStreamChunk[] {
+  return calls.filter((call) => {
+    const placeholder = call.type === "tool_call" && call.name === "tool_name";
+    if (placeholder) {
+      options?.logger?.(
+        `${options.logPrefix ?? ""}ignored the protocol example echoed as a call`,
+      );
+    }
+    return !placeholder;
+  });
 }
 
 /** `<tool_call>{…}</tool_call>` pairs; unparsable ones stay as text. */

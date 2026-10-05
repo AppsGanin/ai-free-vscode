@@ -245,10 +245,29 @@
           <input type="checkbox" data-setting="freeAI.debug" />
           Verbose debug logs in the output channel
         </label>
+        <p class="field">
+          <button type="button" class="secondary" id="copy-debug-report">Copy debug report</button>
+          <span class="hint">
+            Something broke? Turn on verbose logs, reproduce it, then copy the
+            report and paste it into a GitHub issue. Tokens, cookies and
+            e-mails are masked.
+          </span>
+        </p>
 
         <p class="field">
           <label for="qwen-browser-mode">Qwen sign-in browser mode</label>
           <select id="qwen-browser-mode" data-setting="freeAI.qwen.browserMode">
+            <option value="auto">
+              auto — headless first, a window only if the anti-bot blocks it
+            </option>
+            <option value="headed">headed — always a minimized window</option>
+            <option value="headless">headless — never a window</option>
+          </select>
+        </p>
+
+        <p class="field">
+          <label for="zai-browser-mode">Z.ai sign-in browser mode</label>
+          <select id="zai-browser-mode" data-setting="freeAI.zai.browserMode">
             <option value="auto">
               auto — headless first, a window only if the anti-bot blocks it
             </option>
@@ -265,6 +284,32 @@
             min="1000"
             data-setting="freeAI.playwright.timeout"
           />
+        </p>
+
+        <p class="field">
+          <label for="proxy">Proxy for browser windows</label>
+          <span class="input-row">
+            <input
+              type="text"
+              id="proxy"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="empty — use VS Code's http.proxy"
+              data-setting="freeAI.proxy"
+            />
+            <button type="button" class="ghost" id="check-proxy" hidden>
+              Check
+            </button>
+          </span>
+          <span id="proxy-status" class="status" role="status"></span>
+          <span class="hint">
+            <code>http://host:port</code>, <code>http://user:pass@host:port</code>
+            or <code>socks5://host:port</code>, for sign-in and the Qwen / Z.ai
+            bridges. Other requests follow VS Code's <code>http.proxy</code>,
+            so setting only that covers everything. Applies to newly opened
+            windows; reload VS Code for a running bridge. Stored in plain text
+            in settings.json, like <code>http.proxy</code>.
+          </span>
         </p>
       </section>
     </main>

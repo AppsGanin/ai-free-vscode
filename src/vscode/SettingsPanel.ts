@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { errToString, log } from "../logger";
+import { checkProxy } from "../providers/common/browserAuth";
 import type { UnifiedProvider } from "../providers/UnifiedProvider";
 import { listModels } from "../providers/openai/OpenAICompatApiClient";
 import type { OpenAICompatProvider } from "../providers/openai/OpenAICompatProvider";
@@ -26,7 +27,9 @@ const FEATURE_SETTINGS = [
   "freeAI.fix.model",
   "freeAI.debug",
   "freeAI.qwen.browserMode",
+  "freeAI.zai.browserMode",
   "freeAI.playwright.timeout",
+  "freeAI.proxy",
 ] as const;
 
 export interface SettingsPanelDeps {
@@ -119,7 +122,9 @@ export async function showSettingsPanel(
   current.webview.onDidReceiveMessage(
     async (message: { type: string } & Record<string, unknown>) => {
       try {
-        await handleMessage(message, deps, postState, notify, notifySaved);
+        await handleMessage(message, deps, postState, notify, notifySaved, (reply) =>
+          current.webview.postMessage(reply),
+        );
       } catch (err) {
         log(`[settings] ${message.type} failed — ${errToString(err)}`);
         notify(errToString(err), false);
@@ -155,6 +160,7 @@ async function handleMessage(
   postState: () => void,
   notify: (text: string, ok: boolean, models?: string[]) => void,
   notifySaved: () => void,
+  post: (reply: Record<string, unknown>) => void,
 ): Promise<void> {
   switch (message.type) {
     case "ready":
@@ -188,6 +194,10 @@ async function handleMessage(
       );
       return;
     }
+
+    case "copyDebugReport":
+      await vscode.commands.executeCommand(`${deps.provider.id}.copyDebugReport`);
+      return;
 
     case "openJson":
       await vscode.commands.executeCommand(
@@ -236,6 +246,32 @@ async function handleMessage(
       const models = await provider.refreshModels(deps.secrets);
       notify(`${provider.displayName}: ${models.length} model(s).`, true);
       postState();
+      return;
+    }
+
+    case "testProxy": {
+      const value = String(message.value ?? "").trim();
+      const reply = (ok: boolean, text: string) =>
+        post({ type: "proxyResult", ok, text });
+      // Both at once: the direct address is what makes the result readable.
+      const [viaProxy, direct] = await Promise.allSettled([
+        checkProxy(value),
+        directIp(),
+      ]);
+      const directNote =
+        direct.status === "fulfilled" ? ` · without it: ${direct.value}` : "";
+      if (viaProxy.status === "rejected") {
+        reply(false, `✗ ${errToString(viaProxy.reason)}`);
+        return;
+      }
+      const { ip, ms } = viaProxy.value;
+      const same = direct.status === "fulfilled" && direct.value === ip;
+      reply(
+        !same,
+        same
+          ? `✗ Sites still see your own address (${ip}) — the proxy does not hide it.`
+          : `✓ Works — sites see ${ip} (${(ms / 1000).toFixed(1)} s)${directNote}`,
+      );
       return;
     }
 
@@ -436,4 +472,17 @@ function createNonce(): string {
     nonce += alphabet[Math.floor(Math.random() * alphabet.length)];
   }
   return nonce;
+}
+
+/**
+ * The machine's own external address, for comparison with the proxy's. Node's
+ * fetch already goes through VS Code's http.proxy when one is set.
+ */
+async function directIp(): Promise<string> {
+  const res = await fetch("https://api.ipify.org/?format=json", {
+    signal: AbortSignal.timeout(10_000),
+  });
+  const { ip } = (await res.json()) as { ip?: string };
+  if (!ip) throw new Error("no address in the answer");
+  return ip;
 }

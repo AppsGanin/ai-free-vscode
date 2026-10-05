@@ -294,12 +294,36 @@
     for (const el of [...pendingSettings.keys()]) sendSetting(el);
   });
 
+  // Proxy check: offered only once there is an address to check.
+  const proxyInput = $("proxy");
+  const checkProxyButton = $("check-proxy");
+  const proxyStatus = $("proxy-status");
+  const syncProxyButton = () => {
+    checkProxyButton.hidden = !proxyInput.value.trim();
+    if (checkProxyButton.hidden) setStatus(proxyStatus, "", true);
+  };
+  proxyInput.addEventListener("input", syncProxyButton);
+  checkProxyButton.addEventListener("click", () => {
+    checkProxyButton.disabled = true;
+    setStatus(proxyStatus, "Checking — opening a page through the proxy…", true);
+    post("testProxy", { value: proxyInput.value });
+  });
+
+  $("copy-debug-report").addEventListener("click", () => post("copyDebugReport"));
+
   window.addEventListener("message", (event) => {
     const message = event.data;
+
+    if (message.type === "proxyResult") {
+      checkProxyButton.disabled = false;
+      setStatus(proxyStatus, message.text, message.ok);
+      return;
+    }
 
     if (message.type === "state") {
       state = message.payload;
       render();
+      syncProxyButton();
       return;
     }
 

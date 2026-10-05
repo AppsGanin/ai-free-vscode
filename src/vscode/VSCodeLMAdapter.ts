@@ -1,5 +1,13 @@
 import * as vscode from "vscode";
-import { type ScopedLogger, createLogger, errToString } from "../logger";
+import {
+  type ScopedLogger,
+  createLogger,
+  errDetails,
+  errToString,
+  isDebugEnabled,
+  newRequestId,
+  withRequestId,
+} from "../logger";
 import type { BaseAIProvider } from "../providers/BaseAIProvider";
 import { estimateTokens } from "../providers/common/messages";
 import {
@@ -73,6 +81,37 @@ function messageChars(message: AIMessage): number {
   );
 
   return content + calls + results;
+}
+
+/**
+ * The shape of the conversation for a DEBUG line — roles, sizes, tool traffic —
+ * plus the start of the last message, which is what the model answers.
+ */
+function describeTranscript(messages: AIMessage[]): string {
+  const shown = messages.slice(-12).map((m) => {
+    const extra = [
+      m.toolCalls?.length && `${m.toolCalls.length} calls`,
+      m.toolResults?.length && `${m.toolResults.length} results`,
+    ].filter(Boolean);
+    return `${m.role}(${messageChars(m)}${extra.length ? `, ${extra.join(", ")}` : ""})`;
+  });
+  const skipped = messages.length - shown.length;
+  const last = messages[messages.length - 1];
+  const lastText = last
+    ? typeof last.content === "string"
+      ? last.content
+      : last.content.map((p) => (p.type === "text" ? p.text : "[image]")).join(" ")
+    : "";
+  return `${skipped > 0 ? `…${skipped} earlier, ` : ""}${shown.join(" ")}${
+    lastText ? ` · last: ${excerpt(lastText, 200)}` : ""
+  }`;
+}
+
+/** Head and tail of a long text on one line, so a log entry stays readable. */
+function excerpt(text: string, edge = 400): string {
+  const flat = JSON.stringify(text).slice(1, -1); // newlines → \n
+  if (flat.length <= edge * 2 + 20) return flat;
+  return `${flat.slice(0, edge)} …[${flat.length - edge * 2} chars]… ${flat.slice(-edge)}`;
 }
 
 function safeStringify(value: unknown): string {
@@ -153,7 +192,20 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
       }));
   }
 
-  async provideLanguageModelChatResponse(
+  provideLanguageModelChatResponse(
+    model: vscode.LanguageModelChatInformation,
+    messages: readonly vscode.LanguageModelChatRequestMessage[],
+    options: vscode.ProvideLanguageModelChatResponseOptions,
+    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+    token: vscode.CancellationToken,
+  ): Promise<void> {
+    // Every line this request logs, down to the browser bridge, carries one id.
+    return withRequestId(newRequestId(), () =>
+      this.respond(model, messages, options, progress, token),
+    );
+  }
+
+  private async respond(
     model: vscode.LanguageModelChatInformation,
     messages: readonly vscode.LanguageModelChatRequestMessage[],
     options: vscode.ProvideLanguageModelChatResponseOptions,
@@ -212,6 +264,14 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
           .join(" ") || "none"
       }) promptChars=${promptChars} tools=${tools?.length ?? 0} toolMode=${toolMode} thinkingMode=${thinkingMode ?? "auto"}`,
     );
+    if (isDebugEnabled()) {
+      this.log.debug(
+        `protocol=${nativeTools ? "native" : promptToolProtocol ? "prompt" : "text"} tools: ${
+          tools?.map((t) => t.name).join(", ") || "(none)"
+        }`,
+      );
+      this.log.debug(`transcript: ${describeTranscript(aiMessages)}`);
+    }
 
     const stream = this.provider.sendMessageStream(
       {
@@ -249,6 +309,8 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
     // reasoning channel instead of arriving structurally.
     let rawTextAll = "";
     let thinkingAll = "";
+    let firstChunkAt = 0;
+    const chunkCounts: Record<string, number> = {};
 
     const emitToolCall = (callId: string, name: string, args: string) => {
       // Log what VS Code actually receives, not the raw text: normalization
@@ -269,6 +331,11 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
 
     try {
       for await (const chunk of stream) {
+        chunkCounts[chunk.type] = (chunkCounts[chunk.type] ?? 0) + 1;
+        if (!firstChunkAt) {
+          firstChunkAt = Date.now();
+          this.log.debug(`first ${chunk.type} chunk after ${firstChunkAt - startedAt}ms`);
+        }
         if (token.isCancellationRequested) {
           this.log.info(`chat cancelled after ${Date.now() - startedAt}ms`);
           break;
@@ -279,10 +346,17 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
           const safe = sanitizeToolProtocol(chunk.content, promptToolProtocol);
           if (!safe) continue;
           textChars += safe.length;
+          // Reasoning still sitting in its buffer must go out first. Left
+          // there, it was flushed later (on the usage record, which arrives
+          // mid-answer) — VS Code then saw thinking after the answer had
+          // begun, folded everything before it into the collapsed steps, and
+          // the visible reply started mid-word.
+          await thinking.flush();
           await text.push(safe);
         } else if (chunk.type === "thinking") {
           thinkingChars += chunk.content.length;
           thinkingAll += chunk.content;
+          await text.flush();
           await thinking.push(chunk.content);
         } else if (chunk.type === "tool_call") {
           // Flush pending text so the display order stays correct.
@@ -317,6 +391,8 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
       this.log.error(
         `chat error after ${Date.now() - startedAt}ms (text=${textChars} thinking=${thinkingChars} toolCalls=${emitted.length}): ${errToString(err)}`,
       );
+      this.log.debug(`error details: ${errDetails(err)}`);
+      this.logRawOutput(rawTextAll, thinkingAll, chunkCounts);
       throw err;
     }
 
@@ -360,10 +436,10 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
       this.log.warn(
         `empty answer — raw text was ${rawTextAll.length} chars, thinking ${thinkingAll.length}`,
       );
-      if (rawTextAll) {
-        this.log.debug(`raw text head: ${rawTextAll.slice(0, 500)}`);
-      }
     }
+    // What the model actually wrote: most tool-calling bugs are a dialect or a
+    // marker the parser did not expect, and only the raw text shows it.
+    this.logRawOutput(rawTextAll, thinkingAll, chunkCounts);
 
     // Fallback usage (~4 chars/token) so VS Code still shows a context gauge.
     if (!gotProviderUsage) {
@@ -373,6 +449,22 @@ export class VSCodeLMAdapter implements vscode.LanguageModelChatProvider {
         Math.ceil((textChars + thinkingChars) / 4),
       );
     }
+  }
+
+  private logRawOutput(
+    rawText: string,
+    thinking: string,
+    chunkCounts: Record<string, number>,
+  ): void {
+    if (!isDebugEnabled()) return;
+    const counts = Object.entries(chunkCounts)
+      .map(([type, n]) => `${type}=${n}`)
+      .join(" ");
+    this.log.debug(
+      `chunks: ${counts || "none"} · raw text ${rawText.length} chars · thinking ${thinking.length} chars`,
+    );
+    if (rawText) this.log.debug(`raw text: ${excerpt(rawText)}`);
+    if (thinking) this.log.debug(`raw thinking: ${excerpt(thinking, 300)}`);
   }
 
   async provideTokenCount(
@@ -477,7 +569,11 @@ function retypeAgainstSchema(
 
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(args)) {
-    result[key] = coerceToSchemaType(value, declaredType(properties[key]));
+    result[key] = coerceToSchemaType(
+      value,
+      declaredType(properties[key]),
+      declaredType((properties[key] as { items?: unknown } | undefined)?.items),
+    );
   }
   return result;
 }
@@ -492,7 +588,11 @@ function declaredType(property: unknown): string | undefined {
   return undefined;
 }
 
-function coerceToSchemaType(value: unknown, type: string | undefined): unknown {
+function coerceToSchemaType(
+  value: unknown,
+  type: string | undefined,
+  itemsType?: string,
+): unknown {
   if (type === undefined || value === null || value === undefined) return value;
 
   if (type === "string") {
@@ -518,6 +618,10 @@ function coerceToSchemaType(value: unknown, type: string | undefined): unknown {
     return value;
   }
 
+  if (type === "array" && !/^\s*\[/.test(value)) {
+    return arrayFromText(value, itemsType) ?? value;
+  }
+
   if (type === "array" || type === "object") {
     if (!/^\s*[[{]/.test(value)) return value;
     try {
@@ -538,6 +642,32 @@ function coerceToSchemaType(value: unknown, type: string | undefined): unknown {
 }
 
 /**
+ * An array written as text, the way models write ranges: "1-180", "1:120",
+ * "10:-1", "1..80" → [1, 180]. A single value where a list of strings is due
+ * becomes a one-item list. Anything less clear-cut is left for the tool to
+ * reject — guessing at other shapes would hand it wrong values instead.
+ */
+function arrayFromText(
+  value: string,
+  itemsType: string | undefined,
+): unknown[] | undefined {
+  const text = value.trim();
+
+  // Untyped items: only the unmistakable numeric range is taken.
+  if (itemsType === "integer" || itemsType === "number" || itemsType === undefined) {
+    // The separator comes first in the alternation so "1-180" is a range,
+    // while "10:-1" still keeps its negative end (-1 = to the end of file).
+    const range = /^(-?\d+(?:\.\d+)?)\s*(?:-|–|:|,|\.\.|\s+to\s+|\s+)\s*(-?\d+(?:\.\d+)?)$/i.exec(text);
+    if (range) return [Number(range[1]), Number(range[2])];
+    if (itemsType && /^-?\d+(?:\.\d+)?$/.test(text)) return [Number(text)];
+    return undefined;
+  }
+
+  if (itemsType === "string" && text) return [text];
+  return undefined;
+}
+
+/**
  * Strips raw tool protocol and echoed transcript out of a streamed text chunk.
  *
  * NOTE: horizontal whitespace is never collapsed here — this runs on every
@@ -550,11 +680,11 @@ function sanitizeToolProtocol(text: string, enabled: boolean): string {
     stripToolCallBlocks(text)
       .replace(/^\s*tool_call\s*$/gim, "\n")
       .replace(
-        /^\s*(?:User:\s*)?\[(?:Tool result id=[^\]]+|toolu_[^\]]+)\][\s\S]*?(?=^\s*(Assistant:|User:|Tool:)|\Z)/gim,
+        /^\s*(?:User:\s*)?\[(?:Tool result id=[^\]]+|toolu_[^\]]+)\][\s\S]*?(?=^\s*(Assistant:|User:|Tool:)|$(?![\s\S]))/gim,
         "\n",
       )
       .replace(
-        /^\s*\{\s*"status"\s*:\s*"success"[\s\S]*?"type"\s*:\s*"[^"]*_result"[\s\S]*?(?=^\s*(Assistant:|User:|Tool:)|\Z)/gim,
+        /^\s*\{\s*"status"\s*:\s*"success"[\s\S]*?"type"\s*:\s*"[^"]*_result"[\s\S]*?(?=^\s*(Assistant:|User:|Tool:)|$(?![\s\S]))/gim,
         "\n",
       )
       .replace(/^\s*Tool:\s.*$/gim, "\n")

@@ -13,9 +13,11 @@ import {
 } from "./providers/openai/customProviders";
 import { ProviderKey, enabledProviders } from "./providers/providerConfig";
 import { QwenProvider } from "./providers/qwen/QwenProvider";
+import { ZaiProvider } from "./providers/zai/ZaiProvider";
 import { registerCommitMessageCommands } from "./vscode/CommitMessageGenerator";
 import { registerFixProblem } from "./vscode/FixProblemProvider";
 import { registerInlineCompletions } from "./vscode/InlineCompletionProvider";
+import { logEnvironment, registerDebugReport } from "./vscode/DebugReport";
 import { setFeatureBackend } from "./vscode/ModelPicker";
 import { registerSettingsPanel } from "./vscode/SettingsPanel";
 import { VSCodeLMAdapter } from "./vscode/VSCodeLMAdapter";
@@ -27,6 +29,7 @@ const PROVIDER_FACTORIES: Record<ProviderKey, () => BaseAIProvider> = {
   qwen: () => new QwenProvider(),
   deepseek: () => new DeepSeekProvider(),
   kimi: () => new KimiProvider(),
+  zai: () => new ZaiProvider(),
 };
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -55,6 +58,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const customProviders = registerCustomProviders(context, provider);
 
   registerAccountCommands(context, provider);
+  registerDebugReport(context, provider, channel);
   registerSettingsPanel(context, {
     provider,
     secrets: context.secrets,
@@ -64,6 +68,7 @@ export function activate(context: vscode.ExtensionContext): void {
   registerInlineCompletions(context);
   registerFixProblem(context);
 
+  void logEnvironment(context, provider);
   void promptIfSignedOut(provider, context.secrets);
 }
 

@@ -1,5 +1,6 @@
 import type { ConsoleMessage, BrowserContext, Page } from "playwright";
 import { createLogger, errToString, isDebugEnabled } from "../../logger";
+import { STEALTH_INIT } from "../common/stealth";
 import { AuthExpiredError, ProviderError, RateLimitError } from "../types";
 import { launchQwenContext } from "./QwenBrowser";
 
@@ -19,8 +20,17 @@ const WAF_CLEAR_TIMEOUT_MS = 15000;
 const IN_PAGE_FETCH_TIMEOUT_MS = 15000;
 /** How long the user gets to solve an interactive captcha. */
 const MANUAL_CAPTCHA_TIMEOUT_MS = 120000;
+/** Pause between retries while the user works on the captcha. */
+const CAPTCHA_RETRY_INTERVAL_MS = 5000;
 /** Response started but no new stream events for this long — treat as hung. */
 const STREAM_IDLE_TIMEOUT_MS = 120000;
+/**
+ * Before the first event (the in-page fetch aborts itself after
+ * IN_PAGE_FETCH_TIMEOUT_MS) silence means the page was navigated away or froze
+ * under the fetch — nothing will ever arrive, so do not sit out the long idle.
+ */
+const NO_PAGE_RESPONSE = /no response from the page/;
+const FIRST_EVENT_TIMEOUT_MS = IN_PAGE_FETCH_TIMEOUT_MS + 10000;
 const POST_JSON_TIMEOUT_MS = 45000;
 
 const blog = createLogger("qwen-browser");
@@ -116,7 +126,7 @@ export class QwenBrowserBridge {
 
       let blocked = false;
       try {
-        yield* this.runBrowserStream(await this.ensurePage(), opts, state);
+        yield* this.runHeaded(await this.ensurePage(), opts, state);
         blocked = state.wafHit;
       } catch (err) {
         if (state.yielded || !(this.canEscalate && this.mode === "headless")) {
@@ -137,14 +147,14 @@ export class QwenBrowserBridge {
         blog.info("headless bridge blocked by anti-bot, escalating to headed");
         this.mode = "headed";
         await this.close();
-        yield* this.runBrowserStream(await this.ensurePage(), opts, state);
+        yield* this.runHeaded(await this.ensurePage(), opts, state);
       }
 
       // Still blocked → one clearance-cookie refresh (it may have expired).
       if (state.wafHit) {
         blog.info("stream hit WAF, re-clearing cookie and retrying once");
         await this.navigateAndClearWaf(this.page as Page, true);
-        yield* this.runBrowserStream(this.page as Page, opts, state);
+        yield* this.runHeaded(this.page as Page, opts, state);
       }
 
       // Still blocked → interactive captcha.
@@ -241,6 +251,31 @@ export class QwenBrowserBridge {
 
   // ─── Internals ────────────────────────────────────────────────────────────
 
+  /**
+   * runBrowserStream, but in a visible window a page that goes silent counts
+   * as a captcha: it is an overlay, not an HTML answer, so nothing else would
+   * report it — and without wafHit the window would never be brought forward.
+   */
+  private async *runHeaded(
+    page: Page,
+    opts: BrowserStreamOptions,
+    state: RunState,
+  ): AsyncIterable<string> {
+    try {
+      yield* this.runBrowserStream(page, opts, state);
+    } catch (err) {
+      if (
+        state.yielded ||
+        this.mode !== "headed" ||
+        !NO_PAGE_RESPONSE.test(errToString(err))
+      ) {
+        throw err;
+      }
+      blog.warn("no response from the page in a headed window — treating as a captcha");
+      state.wafHit = true;
+    }
+  }
+
   private async *runBrowserStream(
     page: Page,
     opts: BrowserStreamOptions,
@@ -280,21 +315,31 @@ export class QwenBrowserBridge {
         idleTimeoutMs: IN_PAGE_FETCH_TIMEOUT_MS,
       })
       .catch((err) => {
-        this.activeSink?.({ t: "error", message: errToString(err) });
+        const message = errToString(err);
+        // The page navigated under the in-page fetch — Alibaba's captcha
+        // reloads it once solved. Before any output that is a challenge to
+        // retry past, not a failure of the request.
+        if (!state.yielded && PAGE_NAVIGATED.test(message)) {
+          this.activeSink?.({ t: "waf" });
+          return;
+        }
+        this.activeSink?.({ t: "error", message });
       });
 
     try {
       let finished = false;
+      let anyEvent = false;
       while (!finished) {
         if (events.length === 0) {
           await withTimeout(
             new Promise<void>((resolve) => {
               notify = resolve;
             }),
-            STREAM_IDLE_TIMEOUT_MS,
-            "stream idle",
+            anyEvent ? STREAM_IDLE_TIMEOUT_MS : FIRST_EVENT_TIMEOUT_MS,
+            anyEvent ? "stream idle" : "no response from the page",
           );
         }
+        if (events.length > 0) anyEvent = true;
 
         while (events.length > 0) {
           const ev = events.shift() as SinkEvent;
@@ -342,20 +387,38 @@ export class QwenBrowserBridge {
   }
 
   /**
-   * Reveals the window, asks for the captcha, waits for the challenge to clear
-   * and repeats the request.
+   * Reveals the window, asks for the captcha and keeps retrying the request
+   * while the user works on it. The window goes away only once a request has
+   * really passed.
+   *
+   * "The challenge cleared" cannot be read off the page: the WAF interstitial
+   * carries a marker meta tag, but Alibaba's slider (x5sec/baxia) is drawn over
+   * the normal app without one. Waiting on the marker alone used to declare
+   * such a captcha solved at once — the window was minimised the moment it
+   * appeared, and the user was then told to solve a captcha they could no
+   * longer see.
    */
   private async *solveCaptchaAndRetry(
     opts: BrowserStreamOptions,
     state: RunState,
   ): AsyncIterable<string> {
-    const page = this.page as Page;
     await this.revealForCaptcha();
+    const deadline = Date.now() + MANUAL_CAPTCHA_TIMEOUT_MS;
 
-    if (await this.waitForWafClear(page, MANUAL_CAPTCHA_TIMEOUT_MS)) {
-      blog.info("captcha solved by user, retrying request");
-      await this.setWindowBounds(page, { windowState: "minimized" });
+    while (state.wafHit && !state.yielded && Date.now() < deadline) {
+      if (opts.abortSignal?.aborted) break;
+      const page = await this.ensureLivePage();
+      // The interstitial kind does announce itself; wait for it to go first.
+      await this.waitForWafClear(page, Math.max(0, deadline - Date.now()));
+      await sleep(CAPTCHA_RETRY_INTERVAL_MS);
+      blog.info("retrying request while the captcha window is shown");
       yield* this.runBrowserStream(page, opts, state);
+    }
+
+    if (!state.wafHit) {
+      blog.info("request passed after the captcha — hiding the window");
+      await this.setWindowBounds(this.page, { windowState: "minimized" });
+      return;
     }
 
     if (state.wafHit) {
@@ -364,6 +427,12 @@ export class QwenBrowserBridge {
         "Qwen anti-bot challenge — solve the captcha in the browser window, then send your request again",
       );
     }
+  }
+
+  /** The bridge page, reopened if the captcha flow closed it. */
+  private async ensureLivePage(): Promise<Page> {
+    if (this.page && !this.page.isClosed()) return this.page;
+    return this.ensurePage();
   }
 
   /** Simple mutex: returns the release function, queueing further requests. */
@@ -605,6 +674,16 @@ function inPageHeaders(token: string): Record<string, string> {
   };
 }
 
+/** page.evaluate failing because the page navigated away under it. */
+// A closed browser is deliberately not one of these: a user who shuts the
+// captcha window means "stop", and must not get a fresh Chrome back.
+const PAGE_NAVIGATED =
+  /Execution context was destroyed|frame was detached|navigat/i;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Does the body look like an Aliyun WAF challenge instead of API data? */
 function isWafHtml(text: string): boolean {
   const head = text.slice(0, 400).toLowerCase();
@@ -628,63 +707,6 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   });
   return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
-
-/**
- * Stealth script (context.addInitScript): hides the usual automation/headless
- * markers so the anti-bot trusts the session. Runs in every document before the
- * page's own scripts.
- */
-const STEALTH_INIT = () => {
-  const def = (obj: object, prop: string, value: unknown) => {
-    try {
-      Object.defineProperty(obj, prop, { get: () => value });
-    } catch {
-      /* ignore */
-    }
-  };
-
-  const nav = navigator as unknown as Record<string, unknown>;
-  def(nav, "webdriver", undefined);
-  def(nav, "hardwareConcurrency", 8);
-  def(nav, "deviceMemory", 8);
-  def(nav, "languages", ["en-US", "en"]);
-  // A non-empty plugin list (headless has none — a dead giveaway).
-  def(nav, "plugins", [1, 2, 3, 4, 5]);
-
-  const w = window as unknown as Record<string, unknown>;
-  w.chrome ??= { runtime: {} };
-
-  // In headless, permissions.query for notifications disagrees with Notification.
-  try {
-    const perms = navigator.permissions as unknown as {
-      query?: (d: { name: string }) => Promise<unknown>;
-    };
-    const orig = perms?.query?.bind(perms);
-    if (orig) {
-      perms.query = (d: { name: string }) =>
-        d?.name === "notifications"
-          ? Promise.resolve({ state: Notification.permission })
-          : orig(d);
-    }
-  } catch {
-    /* ignore */
-  }
-
-  // WebGL vendor/renderer — headless often reports SwiftShader/Google.
-  try {
-    const proto = WebGLRenderingContext.prototype as unknown as {
-      getParameter: (p: number) => unknown;
-    };
-    const getParam = proto.getParameter;
-    proto.getParameter = function (this: unknown, p: number) {
-      if (p === 37445) return "Intel Inc.";
-      if (p === 37446) return "Intel Iris OpenGL Engine";
-      return getParam.call(this, p);
-    };
-  } catch {
-    /* ignore */
-  }
-};
 
 /**
  * Runs INSIDE the page (serialized by Playwright, executed through CDP, so the

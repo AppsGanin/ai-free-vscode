@@ -298,3 +298,15 @@ summary:focus-visible {
 .details-body {
   padding-top: 12px;
 }
+
+/* Input with a button beside it (proxy check). */
+.input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.input-row input {
+  flex: 1;
+  min-width: 0;
+}

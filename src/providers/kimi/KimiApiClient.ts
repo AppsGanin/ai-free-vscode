@@ -10,7 +10,8 @@ import { ProviderError } from "../types";
 import { KIMI_MODELS, resolveKimiModelId } from "./KimiModels";
 
 const PROVIDER_ID = "ai-free-vscode-kimi";
-const BASE_URL = "https://www.kimi.com";
+/** Used when the session does not say which region it belongs to. */
+const DEFAULT_ORIGIN = "https://www.kimi.com";
 const CHAT_PATH = "/apiv2/kimi.gateway.chat.v1.ChatService/Chat";
 const SCENARIO = "SCENARIO_K2D5";
 const USER_AGENT =
@@ -30,6 +31,11 @@ const log = createLogger("kimi-api");
 
 export interface KimiAuthState {
   token: string;
+  /**
+   * Region of the account: kimi.ai (global) or kimi.com (China). The two are
+   * separate services — a token from one is refused by the other.
+   */
+  origin?: string;
 }
 
 interface KimiFrame {
@@ -72,7 +78,8 @@ export class KimiApiClient {
       `request model=${modelId} thinking=${thinking} hasTools=${hasTools} contentChars=${content.length}`,
     );
 
-    const response = await fetch(`${BASE_URL}${CHAT_PATH}`, {
+    const origin = auth.origin ?? DEFAULT_ORIGIN;
+    const response = await fetch(`${origin}${CHAT_PATH}`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${auth.token}`,
@@ -80,8 +87,8 @@ export class KimiApiClient {
         "Connect-Protocol-Version": "1",
         Accept: "*/*",
         "Accept-Language": "en-US,en;q=0.9",
-        Origin: BASE_URL,
-        Referer: `${BASE_URL}/`,
+        Origin: origin,
+        Referer: `${origin}/`,
         "User-Agent": USER_AGENT,
         "X-Msh-Platform": "web",
       },

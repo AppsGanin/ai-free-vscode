@@ -1,4 +1,6 @@
-import { errToString } from "../../logger";
+import { createLogger, errToString } from "../../logger";
+
+const log = createLogger("http");
 import { AuthExpiredError, ProviderError, RateLimitError } from "../types";
 
 /** Maps auth / rate-limit statuses onto typed provider errors. */
@@ -7,6 +9,13 @@ export function throwForStatus(
   response: Response,
   authStatuses: readonly number[] = [401, 403],
 ): void {
+  if (authStatuses.includes(response.status) || response.status === 429) {
+    log.debug(
+      `${providerId} ${response.url || "?"} → HTTP ${response.status} (content-type=${
+        response.headers.get("content-type") ?? "n/a"
+      } retry-after=${response.headers.get("retry-after") ?? "n/a"})`,
+    );
+  }
   if (authStatuses.includes(response.status)) {
     throw new AuthExpiredError(providerId);
   }
