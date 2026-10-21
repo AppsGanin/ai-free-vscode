@@ -658,8 +658,6 @@ function parseXmlFunctionCalls(text: string): AIStreamChunk[] {
 // DeepSeek falls back to this dialect no matter what the system prompt asks
 // for, so it is parsed rather than fought. Closing tags stay optional, as
 // everywhere else here — a block runs to the next tag or to the end.
-// The wrapper tag around a batch of calls, in the two spellings seen so far.
-const WRAP = "(?:function_calls|tool_calls)";
 // Anything before the tag name, up to and including its delimiter. DeepSeek
 // prefixes the whole dialect with its own marker — `<｜｜DSML｜｜invoke …>`,
 // built from fullwidth bars rather than a colon — so the prefix cannot be
@@ -668,27 +666,36 @@ const WRAP = "(?:function_calls|tool_calls)";
 // are excluded so the prefix cannot swallow another dialect's syntax either —
 // without that, `<function=read_file>` parses as tag `read_file` in namespace
 // `function=` and loses every argument.
+// DeepSeek also leaves a space between its marker and the name at times:
+// `<｜｜DSML｜｜ invoke …>`. Only after a bar — `<!-- invoke name="x" -->` in
+// an answer must stay a comment.
 const NS_CHAR = "[^\\s<>/=\"']";
-export const XML_NS_PREFIX = `(?:${NS_CHAR}{0,24}(?!\\w)${NS_CHAR})?`;
+const NS_BODY = `${NS_CHAR}{0,24}(?:(?!\\w)${NS_CHAR}|[|\\uFF5C][ \\t]+)`;
+export const XML_NS_PREFIX = `(?:${NS_BODY})?`;
 const NS = XML_NS_PREFIX;
+// The wrapper tag around a batch of calls, with its prefix. DeepSeek shortens
+// it to a bare `calls` (`<｜｜DSML｜｜ calls>`), accepted only behind a prefix:
+// `<calls>` on its own is plausible prose.
+export const XML_WRAP_TAG = `(?:${NS}(?:function_calls|tool_calls)|${NS_BODY}calls)`;
+const WRAP = XML_WRAP_TAG;
 // `[^>]*` after the name: models hang extra attributes off both tags, e.g.
 // `<parameter name="query" string="true">`.
 const INVOKE_RE = new RegExp(
   `<${NS}invoke\\s+name\\s*=\\s*["']?([\\w.:-]+)["']?[^>]*>([\\s\\S]*?)` +
-    `(?=</${NS}invoke>|<${NS}invoke\\b|</${NS}${WRAP}>|$)`,
+    `(?=</${NS}invoke>|<${NS}invoke\\b|</${WRAP}>|$)`,
   "gi",
 );
 const XML_PARAMETER_ATTR_RE = new RegExp(
   `<${NS}parameter\\s+name\\s*=\\s*["']?([\\w.:-]+)["']?[^>]*>([\\s\\S]*?)` +
-    `(?=</${NS}parameter>|<${NS}parameter\\b|</${NS}invoke>|</${NS}${WRAP}>|$)`,
+    `(?=</${NS}parameter>|<${NS}parameter\\b|</${NS}invoke>|</${WRAP}>|$)`,
   "gi",
 );
 /** A hold that is this dialect rather than prose that merely says "<invoke". */
 const INVOKE_PROTOCOL_RE = new RegExp(
-  `<${NS}${WRAP}>|<${NS}invoke\\s+name\\s*=`,
+  `<${WRAP}>|<${NS}invoke\\s+name\\s*=`,
   "i",
 );
-const INVOKE_MARKER_RE = new RegExp(`<${NS}(?:invoke|${WRAP})\\b`, "i");
+const INVOKE_MARKER_RE = new RegExp(`<(?:${NS}invoke|${WRAP})\\b`, "i");
 /**
  * Tail of a buffer that has opened a namespaced protocol tag but not yet
  * reached its name (`<｜｜DSML｜｜too`, `<ns:inv`). The literal markers cover the
@@ -701,7 +708,7 @@ const INVOKE_MARKER_RE = new RegExp(`<${NS}(?:invoke|${WRAP})\\b`, "i");
  * the holdback and is still whole when the marker scan reaches it.
  */
 const NS_PARTIAL_TAIL_RE = new RegExp(
-  `<${NS_CHAR}{0,24}[|\\u0080-\\uffff]\\w{0,14}$`,
+  `<${NS_CHAR}{0,24}(?:[|\\u0080-\\uffff]|[|\\uFF5C][ \\t])\\w{0,14}$`,
 );
 
 function parseInvokeTagCalls(text: string): AIStreamChunk[] {

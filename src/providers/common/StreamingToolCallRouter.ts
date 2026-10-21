@@ -1,6 +1,7 @@
 import type { AIStreamChunk } from "../types";
 import {
   XML_NS_PREFIX,
+  XML_WRAP_TAG,
   findToolCallMarkerStart,
   looksLikeToolCallStart,
   parseToolCallsFromText,
@@ -108,22 +109,23 @@ const STRAY_CLOSE_TAGS = [
 // dialect bare, `ns:`-prefixed and behind its own `<｜｜DSML｜｜…>` marker.
 const PROTOCOL_TAGS =
   "tool_calls|tool_call|function_calls|function|invoke|parameter|tool_name|tool_arguments";
+// The prefixed-only `calls` wrapper rides along through XML_WRAP_TAG.
+const PROTOCOL_TAG = `(?:${XML_NS_PREFIX}(?:${PROTOCOL_TAGS})|${XML_WRAP_TAG})`;
 const STRAY_CLOSE_TAG_RE = new RegExp(
-  `</${XML_NS_PREFIX}(?:${PROTOCOL_TAGS})>[ \t]*\n?`,
+  `</${PROTOCOL_TAG}>[ \t]*\n?`,
   "gi",
 );
 
 // Opening and closing halves of the tag set above, for the case where only one
 // side of a call survived. `[^>]*` carries the attributes some dialects add.
 const STRAY_PROTOCOL_TAG_RE = new RegExp(
-  `<${XML_NS_PREFIX}(?:${PROTOCOL_TAGS})\\b[^>]*>|</${XML_NS_PREFIX}(?:${PROTOCOL_TAGS})>`,
+  `<${PROTOCOL_TAG}\\b[^>]*>|</${PROTOCOL_TAG}>`,
   "gi",
 );
 // A whole `<function_calls>…</function_calls>` / `<invoke …>…</invoke>` block,
 // closing tag optional.
 const WRAPPED_CALLS_RE = new RegExp(
-  `<${XML_NS_PREFIX}(?:function_calls|tool_calls)>[\\s\\S]*?` +
-    `(?:</${XML_NS_PREFIX}(?:function_calls|tool_calls)>|$)`,
+  `<${XML_WRAP_TAG}>[\\s\\S]*?(?:</${XML_WRAP_TAG}>|$)`,
   "gi",
 );
 const INVOKE_BLOCK_RE = new RegExp(

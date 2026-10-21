@@ -97,6 +97,19 @@ const DIALECTS: Array<[string, string, Array<{ name: string; args: unknown }>]> 
     `${DSML}tool_calls> ${DSML}invoke name="grep_search"> ${DSML}parameter name="query" string="true">riskCRUD${DSML_CLOSE}parameter> ${DSML}parameter name="isRegexp" string="false">false${DSML_CLOSE}parameter> ${DSML_CLOSE}invoke>`,
     [{ name: "grep_search", args: { query: "riskCRUD", isRegexp: false } }],
   ],
+  [
+    "#19 DSML with a space before the name and a bare `calls` wrapper",
+    `${DSML} calls>\n${DSML} invoke name="read_file">\n${DSML} parameter name="filePath" string="true">src/a.ts${DSML_CLOSE} parameter>\n${DSML_CLOSE} invoke>\n${DSML_CLOSE} calls>`,
+    [{ name: "read_file", args: { filePath: "src/a.ts" } }],
+  ],
+  [
+    "#19 two DSML `calls` blocks back to back",
+    `${DSML} calls>\n${DSML} invoke name="read_file">\n${DSML} parameter name="filePath">a.ts${DSML_CLOSE} parameter>\n${DSML_CLOSE} invoke>\n${DSML_CLOSE} calls>\n${DSML} calls>\n${DSML} invoke name="grep_search">\n${DSML} parameter name="query">foo${DSML_CLOSE} parameter>\n${DSML_CLOSE} invoke>\n${DSML_CLOSE} calls>`,
+    [
+      { name: "read_file", args: { filePath: "a.ts" } },
+      { name: "grep_search", args: { query: "foo" } },
+    ],
+  ],
 ];
 
 describe("tool call dialects", () => {
@@ -112,6 +125,20 @@ describe("tool call dialects", () => {
       3,
     );
     expect(text).toBe("Let me look.\n\nThen I report.");
+  });
+
+  it.each(SIZES)("leaves no DSML tags in the visible text (#19) — chunk size %d", (size) => {
+    const { text, calls } = route(
+      `Let me look.\n\n${DSML} calls>\n${DSML} invoke name="list_dir">\n${DSML} parameter name="path">.${DSML_CLOSE} parameter>\n${DSML_CLOSE} invoke>\n${DSML_CLOSE} calls>`,
+      size,
+    );
+    expect(text.trim()).toBe("Let me look.");
+    expect(calls).toEqual([{ name: "list_dir", args: { path: "." } }]);
+  });
+
+  it("keeps a bare <calls> in prose", () => {
+    const prose = "The XML has <calls> and </calls> elements.";
+    expect(route(prose, 3)).toEqual({ text: prose, calls: [] });
   });
 
   it("does not treat the protocol example from our own prompt as a call", () => {
@@ -136,6 +163,8 @@ const PROSE = [
   "Render <Button onClick={fn}>Save</Button> inside <Form>.",
   "日本語のテキストと <タグ> の組み合わせ。Emoji 🚀 and <🎯>.",
   'JSON the user asked for: {"name":"my-pkg","version":"1.0.0"}',
+  '<!-- invoke name="x" --> and <!-- calls --> are comments (#19).',
+  "In R: f <- function(x) x > 1",
 ];
 
 describe("prose integrity", () => {
