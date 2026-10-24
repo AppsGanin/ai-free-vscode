@@ -125,7 +125,11 @@ export class FreeAiAdapter extends LlmAdapter {
       startedAt: Date.now(),
       isCancelled: () => options.signal?.aborted === true,
     }).then(
-      (assembled) => writer.finish(assembled.toolCalls.length > 0, assembled.gotProviderUsage),
+      (assembled) =>
+        // The providers end a cancelled request quietly; it is not an empty answer.
+        options.signal?.aborted
+          ? writer.abort()
+          : writer.finish(assembled.toolCalls.length > 0, assembled.gotProviderUsage),
       (err: unknown) => writer.fail(toLlmError(err, route.name)),
     );
 
@@ -218,6 +222,15 @@ class ChunkWriter implements ResponseSink {
     this.end();
   }
 
+  abort(): void {
+    this.close();
+    this.push({
+      type: "finish",
+      reason: { kind: "aborted", failure: { message: "The request was cancelled", code: "ABORTED" } },
+    });
+    this.end();
+  }
+
   fail(error: unknown): void {
     this.error = error;
     this.end();
@@ -272,7 +285,11 @@ class ChunkWriter implements ResponseSink {
   }
 }
 
-/** Our provider errors → harness codes, so its retry policy can tell them apart. */
+/**
+ * Our provider errors → harness codes. The transient ones use the codes the
+ * harness retry policy repeats by default (RATE_LIMIT, SERVER, TIMEOUT,
+ * TRANSPORT); our providers have already retried what they could themselves.
+ */
 export function toLlmError(err: unknown, routeName: string): unknown {
   if (err instanceof LlmError) return err;
   if (isAbortError(err)) return err;
@@ -285,20 +302,26 @@ export function toLlmError(err: unknown, routeName: string): unknown {
     );
   }
   if (err instanceof RateLimitError) {
-    return new LlmError(message, "RATE_LIMITED", {
+    return new LlmError(message, "RATE_LIMIT", {
       status: 429,
       ...(err.retryAfterMs ? { providerRetryAfterMs: err.retryAfterMs } : {}),
       cause: err,
     });
   }
   if (err instanceof WafChallengeError) return new LlmError(message, "ANTI_BOT", { cause: err });
-  if (isNetworkFailure(err)) return new LlmError(message, "NETWORK", { cause: err });
+  if (isNetworkFailure(err)) return new LlmError(message, "TRANSPORT", { cause: err });
   if (err instanceof ProviderError) {
     const status = err.statusCode && err.statusCode >= 100 && err.statusCode <= 599 ? err.statusCode : undefined;
-    return new LlmError(message, "PROVIDER_ERROR", { ...(status ? { status } : {}), cause: err });
+    const withStatus = { ...(status ? { status } : {}), cause: err };
+    if (/timeout|timed out/i.test(err.message)) return new LlmError(message, "TIMEOUT", withStatus);
+    if ((status ?? 0) >= 500 || OVERLOADED.test(err.message)) return new LlmError(message, "SERVER", withStatus);
+    return new LlmError(message, "PROVIDER_ERROR", withStatus);
   }
   return new LlmError(message, "PROVIDER_ERROR", { cause: err });
 }
+
+/** The backend is busy, not refusing: worth asking again in a moment. */
+const OVERLOADED = /at capacity|overloaded|server is busy|too busy|try again later|internal error/i;
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);

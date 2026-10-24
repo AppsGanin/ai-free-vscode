@@ -2,9 +2,9 @@ import { INVALID_CREDENTIAL_CODE, LlmError, MessageId, type StreamChunk, ToolCal
 import { describe, expect, it } from "vitest";
 import { BaseAIProvider } from "../../src/providers/BaseAIProvider";
 import type { AIModelInfo, AIRequestParams, AIStreamChunk } from "../../src/providers/types";
-import { AuthExpiredError } from "../../src/providers/types";
+import { AuthExpiredError, ProviderError, RateLimitError } from "../../src/providers/types";
 import { memorySecrets } from "../../test/helpers";
-import { FreeAiAdapter } from "../src/adapter";
+import { FreeAiAdapter, toLlmError } from "../src/adapter";
 import { toAIMessages } from "../src/messages";
 
 const MODEL: AIModelInfo = {
@@ -45,9 +45,10 @@ class FakeProvider extends BaseAIProvider {
 const adapterFor = (provider: FakeProvider, autoSignIn = true) =>
   new FreeAiAdapter([{ id: "fake-web", name: provider.displayName, provider }], memorySecrets(), autoSignIn);
 
-async function run(adapter: FreeAiAdapter, tools = false): Promise<StreamChunk[]> {
+async function run(adapter: FreeAiAdapter, tools = false, signal?: AbortSignal): Promise<StreamChunk[]> {
   const out: StreamChunk[] = [];
   for await (const chunk of adapter.stream({
+    signal,
     provider: "fake-web",
     model: "m1",
     messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
@@ -130,6 +131,28 @@ describe("FreeAiAdapter", () => {
     const call = chunks.find((c) => c.type === "block-end" && c.block.type === "tool-call");
     expect(call).toMatchObject({ block: { name: "view", arguments: '{"path":"b.ts"}' } });
     expect(chunks.at(-1)).toEqual({ type: "finish", reason: { kind: "tool-calls" } });
+  });
+
+  it("finishes a cancelled request as aborted, not as an empty answer", async () => {
+    const controller = new AbortController();
+    // As the providers do: a request cancelled while queued just ends.
+    const provider = new FakeProvider(async function* () {
+      controller.abort();
+    });
+    const chunks = await run(adapterFor(provider), false, controller.signal);
+    expect(chunks).toEqual([
+      { type: "finish", reason: { kind: "aborted", failure: { message: "The request was cancelled", code: "ABORTED" } } },
+    ]);
+  });
+
+  it("hands transient failures over with the codes the harness retries", async () => {
+    const codeOf = (err: unknown) => (toLlmError(err, "Fake") as LlmError).failure.code;
+    expect(codeOf(new RateLimitError("fake", 2000))).toBe("RATE_LIMIT");
+    expect(codeOf(new ProviderError("fake", "Z.ai error: Model is currently at capacity. Please try again later"))).toBe("SERVER");
+    expect(codeOf(new ProviderError("fake", "HTTP 502: bad gateway", 502))).toBe("SERVER");
+    expect(codeOf(new ProviderError("fake", "browser bridge timeout: stream (120000ms)"))).toBe("TIMEOUT");
+    expect(codeOf(new TypeError("fetch failed"))).toBe("TRANSPORT");
+    expect(codeOf(new ProviderError("fake", "Content blocked by moderation", 400))).toBe("PROVIDER_ERROR");
   });
 
   it("reports a refused session as an invalid credential", async () => {
