@@ -130,6 +130,12 @@ export class QwenProvider extends BaseAIProvider {
     );
   }
 
+  override dispose(): void {
+    // The bridge's Chrome keeps the host process alive until it is closed.
+    void this.browser.close();
+    super.dispose();
+  }
+
   /** Reads a fresh token from the live browser session; undefined if unchanged. */
   private async tryRefreshToken(
     secrets: SecretStore,
