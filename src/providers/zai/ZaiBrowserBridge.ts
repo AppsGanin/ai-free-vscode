@@ -75,6 +75,7 @@ export interface ZaiBrowserRequest {
  */
 export class ZaiBrowserBridge {
   private context: BrowserContext | undefined;
+  private launching: Promise<BrowserContext> | undefined;
   private page: Page | undefined;
   private activeSink: ((ev: SinkEvent) => void) | null = null;
   private mutexChain: Promise<void> = Promise.resolve();
@@ -441,9 +442,19 @@ export class ZaiBrowserBridge {
     return release;
   }
 
+  /**
+   * Single-flight: parallel requests must share one launch, or the second
+   * one hits the profile lock the first holds.
+   */
   private async ensureContext(): Promise<BrowserContext> {
     if (this.context) return this.context;
+    this.launching ??= this.launchContext().finally(() => {
+      this.launching = undefined;
+    });
+    return this.launching;
+  }
 
+  private async launchContext(): Promise<BrowserContext> {
     const headless = this.mode === "headless";
     blog.info(`launching browser bridge (mode=${this.mode})`);
     const context = await withTimeout(
@@ -686,6 +697,11 @@ const INTERCEPT_INIT = (args: { sinkName: string; overrideKey: string }) => {
       web_search: false,
       auto_web_search: false,
       image_generation: false,
+      // The web app now runs every chat as its "general agent": the model
+      // works in Z.ai's own server sandbox with its own tools and never
+      // reaches the caller's tools. A plain chat keeps it on our protocol.
+      flags: [],
+      preview_mode: false,
     };
     // Title/tag generation would be a second model call for a chat we delete.
     delete body.background_tasks;

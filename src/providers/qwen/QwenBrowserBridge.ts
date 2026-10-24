@@ -86,6 +86,8 @@ export interface BrowserStreamOptions {
 export class QwenBrowserBridge {
   private context: BrowserContext | undefined;
   private page: Page | undefined;
+  private launching: Promise<BrowserContext> | undefined;
+  private opening: Promise<Page> | undefined;
   private activeSink: ((ev: SinkEvent) => void) | null = null;
   private mutexChain: Promise<void> = Promise.resolve();
 
@@ -446,9 +448,20 @@ export class QwenBrowserBridge {
     return release;
   }
 
+  /**
+   * Single-flight: Copilot (and the harness) fire requests in parallel, and a
+   * second launch while the first holds the profile lock fell back to a
+   * bundled Chromium that is not installed — failing both requests.
+   */
   private async ensureContext(): Promise<BrowserContext> {
     if (this.context) return this.context;
+    this.launching ??= this.launchContext().finally(() => {
+      this.launching = undefined;
+    });
+    return this.launching;
+  }
 
+  private async launchContext(): Promise<BrowserContext> {
     const headless = this.mode === "headless";
     blog.info(`launching browser bridge (mode=${this.mode})`);
     const context = await withTimeout(
@@ -477,9 +490,16 @@ export class QwenBrowserBridge {
     return context;
   }
 
+  /** Single-flight like ensureContext: one bridge page, however many callers. */
   private async ensurePage(): Promise<Page> {
     if (this.page && !this.page.isClosed()) return this.page;
+    this.opening ??= this.openPage().finally(() => {
+      this.opening = undefined;
+    });
+    return this.opening;
+  }
 
+  private async openPage(): Promise<Page> {
     const context = await this.ensureContext();
     const page = await context.newPage();
     watchConsole(page);
