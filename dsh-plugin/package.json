@@ -4,10 +4,14 @@
   "description": "Qwen, DeepSeek, Kimi and Z.ai web chats as DeepSeek Harness model providers, signed in through your own browser account",
   "license": "MIT",
   "author": "AppsGanin",
+  "homepage": "https://github.com/AppsGanin/ai-free-vscode/tree/main/dsh-plugin#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/AppsGanin/ai-free-vscode.git",
     "directory": "dsh-plugin"
+  },
+  "bugs": {
+    "url": "https://github.com/AppsGanin/ai-free-vscode/issues"
   },
   "keywords": [
     "dsh-plugin",
@@ -20,10 +24,11 @@
   "type": "module",
   "main": "lib/index.js",
   "files": [
-    "lib",
+    "lib/*.js",
     "cordis.patch.yml",
     "locale",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "node build.mjs",
@@ -36,7 +41,8 @@
     }
   },
   "engines": {
-    "dsh": ">=0.2.1-rc.2 <0.3.0"
+    "dsh": ">=0.2.1-rc.2 <0.3.0",
+    "node": ">=20"
   },
   "dependencies": {
     "playwright": "^1.60.0"

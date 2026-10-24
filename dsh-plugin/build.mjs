@@ -1,3 +1,4 @@
+import { copyFileSync } from "node:fs";
 import { build } from "esbuild";
 
 // The provider core (../src/providers) is bundled in; playwright and the
@@ -10,9 +11,13 @@ await build({
   format: "esm",
   platform: "node",
   target: "node20",
-  sourcemap: true,
+  // The npm package carries the bundle only; the sources are on GitHub.
+  sourcemap: false,
   external: ["playwright", "@deepseek-ai/*"],
   logLevel: "info",
   // The core reads this build-time switch; every provider is compiled in.
   define: { __ENABLED_PROVIDERS__: "undefined" },
 });
+
+// One licence for the repository; the package carries a copy.
+copyFileSync("../LICENSE", "LICENSE");

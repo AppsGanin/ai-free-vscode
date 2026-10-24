@@ -10,3 +10,4 @@ dist/
 .DS_Store
 test/live/.reports/
 dsh-plugin/lib/
+dsh-plugin/LICENSE
