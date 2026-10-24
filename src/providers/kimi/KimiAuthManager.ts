@@ -10,6 +10,7 @@ import {
   readLocalStorage,
 } from "../common/browserAuth";
 import { forgetRejected, storedToken } from "../common/rejectedAuth";
+export { expiresSoon } from "../common/jwt";
 import type { SecretStore } from "../types";
 
 const AUTH_SECRET_KEY = "ai-free-vscode.kimi.auth";
@@ -38,24 +39,10 @@ export interface KimiAuthPayload {
 }
 
 const REFRESH_PATH = "/api/account.gateway.v1.AuthService/RefreshToken";
-/** Refreshed ahead of a request when the access token is this close to expiry. */
-const EXPIRY_MARGIN_MS = 60_000;
 
 /** Kimi's auth service lives on its own host: auth.kimi.ai / auth.kimi.com. */
 function authHost(origin: string): string {
   return origin.replace("://www.", "://auth.");
-}
-
-/** Whether the JWT expires within the margin (or carries no expiry we can read). */
-export function expiresSoon(token: string, now = Date.now()): boolean {
-  try {
-    const payload = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8")) as {
-      exp?: number;
-    };
-    return typeof payload.exp === "number" && payload.exp * 1000 - now < EXPIRY_MARGIN_MS;
-  } catch {
-    return false;
-  }
 }
 
 export class KimiAuthManager {

@@ -3,6 +3,7 @@ import type { BrowserContext, Response } from "playwright";
 import { createLogger, errToString } from "../../logger";
 import {
   launchLoginContext,
+  launchPersistentProfile,
   loginTimeoutMs,
   normalizeToken,
   pollForToken,
@@ -14,6 +15,8 @@ import type { SecretStore } from "../types";
 
 const AUTH_SECRET_KEY = "ai-free-vscode.deepseek.auth";
 const HOME_URL = "https://chat.deepseek.com";
+/** How long a background read of the profile waits for the app's first API call. */
+const REREAD_TIMEOUT_MS = 20000;
 const browserDataDir = (): string => profileDir("deepseek-browser-profile");
 
 const dlog = createLogger("deepseek-auth");
@@ -87,6 +90,62 @@ export class DeepSeekAuthManager {
       throw err;
     } finally {
       await context.close();
+    }
+  }
+
+  /**
+   * The session the browser profile holds now, read in the background: the
+   * profile often outlives a stored token the API has started refusing.
+   * Single-flight: parallel requests share one read.
+   *
+   * @returns the stored sign-in when the profile had a different, signed-in
+   * session, undefined when it has nothing new (the user must sign in).
+   */
+  reread(secrets: SecretStore, rejected: DeepSeekAuthPayload): Promise<DeepSeekAuthPayload | undefined> {
+    this.rereading ??= this.readProfileSession(secrets, rejected).finally(() => {
+      this.rereading = undefined;
+    });
+    return this.rereading;
+  }
+
+  private rereading: Promise<DeepSeekAuthPayload | undefined> | undefined;
+
+  private async readProfileSession(
+    secrets: SecretStore,
+    rejected: DeepSeekAuthPayload,
+  ): Promise<DeepSeekAuthPayload | undefined> {
+    let context: BrowserContext | undefined;
+    try {
+      context = await launchPersistentProfile(browserDataDir(), { headless: true });
+      const page = context.pages()[0] ?? (await context.newPage());
+      // The app's first authenticated call carries the token it trusts.
+      const captured = this.waitForAuthApiCall(context, REREAD_TIMEOUT_MS).catch(() => undefined);
+      await page.goto(HOME_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+      const token =
+        normalizeToken(await captured) ??
+        normalizeToken(await readLocalStorage(page, ["userToken", "token", "access_token"]));
+      const cookieHeader = (await context.cookies(HOME_URL))
+        .filter((c) => c?.name && typeof c.value === "string")
+        .map((c) => `${c.name}=${c.value}`)
+        .join("; ");
+      if (!token || !cookieHeader.includes("ds_session_id=")) {
+        dlog.info("reread: the browser profile is signed out too");
+        return undefined;
+      }
+      if (token === rejected.token && cookieHeader === rejected.cookieHeader) {
+        dlog.info("reread: the browser profile holds the same refused session");
+        return undefined;
+      }
+      const next = { token, cookieHeader };
+      await secrets.store(AUTH_SECRET_KEY, JSON.stringify(next));
+      dlog.info("reread: a live session from the browser profile stored");
+      return next;
+    } catch (err) {
+      // A profile held by a sign-in window, a missing Chrome: the user signs in.
+      dlog.warn(`reread: failed — ${errToString(err)}`);
+      return undefined;
+    } finally {
+      await context?.close().catch(() => undefined);
     }
   }
 

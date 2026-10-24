@@ -21,7 +21,7 @@ interface Call {
  * — an error to throw, or chunks to stream — and is recorded, so a test can
  * check how the provider recovered (which session, parent, model, budget).
  */
-function provider(script: Step[]) {
+function provider(script: Step[], reread?: { token: string; cookieHeader: string }) {
   const calls: Call[] = [];
   const forgotten: unknown[] = [];
   let sessions = 0;
@@ -54,6 +54,7 @@ function provider(script: Step[]) {
       forget: async (_secrets: unknown, auth: unknown) => {
         forgotten.push(auth);
       },
+      reread: async () => reread,
     },
   });
   return { p, calls, forgotten };
@@ -184,6 +185,16 @@ describe("DeepSeek provider recovery", () => {
     expect(calls).toHaveLength(1);
     // The refused session must not be sent again.
     expect(forgotten).toEqual([{ token: "t", cookieHeader: "c" }]);
+  });
+
+  it("retries with a live session re-read from the browser profile", async () => {
+    const { p, calls, forgotten } = provider(
+      [new AuthExpiredError("ai-free-vscode-deepseek"), [{ type: "text", content: "ok" }]],
+      { token: "t2", cookieHeader: "c2" },
+    );
+    expect((await ask(p)).text).toBe("ok");
+    expect(calls).toHaveLength(2);
+    expect(forgotten).toEqual([]);
   });
 
   it("keeps the session on a bare 403, which is as often the anti-bot", async () => {

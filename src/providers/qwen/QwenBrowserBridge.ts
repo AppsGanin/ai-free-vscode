@@ -1,6 +1,7 @@
 import type { ConsoleMessage, BrowserContext, Page } from "playwright";
 import { createLogger, errToString, isDebugEnabled } from "../../logger";
 import { STEALTH_INIT } from "../common/stealth";
+import { expiresSoon } from "../common/jwt";
 import { AuthExpiredError, ProviderError, RateLimitError } from "../types";
 import { launchQwenContext } from "./QwenBrowser";
 import { webVersion } from "./QwenWebVersion";
@@ -10,6 +11,9 @@ const HOME_URL = "https://chat.qwen.ai";
 const SINK_BINDING = "__qwenSseSink";
 // App headers of the web client (see appHeaders in QwenApiClient).
 const BX_V = "2.5.37";
+
+/** How long a reloaded bridge page gets to renew its token. */
+const TOKEN_RENEW_WAIT_MS = 10000;
 
 // Timeouts so the bridge fails with a clear error instead of hanging forever.
 const LAUNCH_TIMEOUT_MS = 45000;
@@ -120,7 +124,7 @@ export class QwenBrowserBridge {
    * the same shape as a direct response, so the shared parser handles both.
    */
   async *streamChat(opts: BrowserStreamOptions): AsyncIterable<string> {
-    const release = await this.acquire();
+    const release = await this.acquire("stream");
     try {
       // While nothing has been yielded the request can be safely repeated: both
       // the WAF and the hangs happen before the first chunk.
@@ -174,7 +178,7 @@ export class QwenBrowserBridge {
     token: string,
     body: unknown,
   ): Promise<{ ok: boolean; status: number; text: string }> {
-    const release = await this.acquire();
+    const release = await this.acquire("postJson");
     try {
       const page = await this.ensurePage();
       const runOnce = async () => {
@@ -205,6 +209,34 @@ export class QwenBrowserBridge {
       return isWafHtml(result.text)
         ? { ok: false, status: result.status, text: result.text }
         : result;
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * A token that is not about to expire. The web app renews its token only
+   * when it loads (GET auth.qwen.ai/api/v2/auths/refresh, signed with the
+   * anti-bot headers it alone can make), so a bridge page open for a while
+   * holds an old one: it is reloaded and the renewed token awaited. Under the
+   * bridge mutex — a reload would cut a stream in flight.
+   */
+  async readFreshToken(): Promise<string | undefined> {
+    const release = await this.acquire("token");
+    try {
+      const current = await this.readToken();
+      if (current && !expiresSoon(current)) return current;
+      const page = await this.ensureLivePage();
+      blog.info("token expiring — reloading the bridge page so the app renews it");
+      await this.navigateAndClearWaf(page, true);
+      const deadline = Date.now() + TOKEN_RENEW_WAIT_MS;
+      while (Date.now() < deadline) {
+        const token = await this.readToken();
+        if (token && token !== current && !expiresSoon(token)) return token;
+        await sleep(500);
+      }
+      blog.warn("the bridge page did not renew the token");
+      return current;
     } finally {
       release();
     }
@@ -438,14 +470,19 @@ export class QwenBrowserBridge {
   }
 
   /** Simple mutex: returns the release function, queueing further requests. */
-  private async acquire(): Promise<() => void> {
+  private async acquire(who = "?"): Promise<() => void> {
     let release!: () => void;
     const previous = this.mutexChain;
     this.mutexChain = new Promise<void>((resolve) => {
       release = resolve;
     });
+    blog.debug(`bridge: ${who} waiting`);
     await previous;
-    return release;
+    blog.debug(`bridge: ${who} acquired`);
+    return () => {
+      blog.debug(`bridge: ${who} released`);
+      release();
+    };
   }
 
   /**

@@ -187,7 +187,7 @@ export class DeepSeekProvider extends BaseAIProvider {
     params: AIRequestParams,
     secrets: SecretStore,
   ): AsyncIterable<AIStreamChunk> {
-    const auth = await this.authManager.getAuth(secrets);
+    let auth = await this.authManager.getAuth(secrets);
     if (!auth) {
       throw new AuthExpiredError(this.id);
     }
@@ -196,6 +196,22 @@ export class DeepSeekProvider extends BaseAIProvider {
     try {
       // The wait can outlive the request that was queued.
       if (params.abortSignal?.aborted) return;
+      let shown = false;
+      try {
+        for await (const chunk of this.streamInSlot(params, auth)) {
+          shown = true;
+          yield chunk;
+        }
+        return;
+      } catch (err) {
+        if (!(err instanceof AuthExpiredError) || !err.rejectsCredential || shown) throw err;
+        // The browser profile often still holds a live session: take it from
+        // there before asking the user to sign in again.
+        const fresh = await this.authManager.reread(secrets, auth);
+        if (!fresh) throw err;
+        log(`[${this.id}] session re-read from the browser profile, retrying`);
+        auth = fresh;
+      }
       yield* this.streamInSlot(params, auth);
     } catch (err) {
       if (err instanceof AuthExpiredError) {

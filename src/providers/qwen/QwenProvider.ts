@@ -2,6 +2,7 @@ import { log } from "../../logger";
 import { BaseAIProvider } from "../BaseAIProvider";
 import { hostSettings } from "../common/hostSettings";
 import { conversationKey } from "../common/messages";
+import { expiresSoon } from "../common/jwt";
 import type { AIModelInfo, AIRequestParams, AIStreamChunk, SecretStore } from "../types";
 import { AuthExpiredError } from "../types";
 import { QwenApiClient } from "./QwenApiClient";
@@ -48,9 +49,14 @@ export class QwenProvider extends BaseAIProvider {
     params: AIRequestParams,
     secrets: SecretStore,
   ): AsyncIterable<AIStreamChunk> {
-    const token = await this.authManager.getToken(secrets);
+    let token = await this.authManager.getToken(secrets);
     if (!token) {
       throw new AuthExpiredError(this.id);
+    }
+    // The token lives 15 minutes: renewed ahead from the live session, not
+    // after a refused chats/new.
+    if (expiresSoon(token)) {
+      token = (await this.tryRefreshToken(secrets, token)) ?? token;
     }
 
     const key = conversationKey(params);
@@ -141,7 +147,7 @@ export class QwenProvider extends BaseAIProvider {
     secrets: SecretStore,
     current: string,
   ): Promise<string | undefined> {
-    const raw = await this.browser.readToken().catch(() => undefined);
+    const raw = await this.browser.readFreshToken().catch(() => undefined);
     if (!raw) return undefined;
     const stored = await this.authManager.saveToken(secrets, raw);
     return stored && stored !== current ? stored : undefined;

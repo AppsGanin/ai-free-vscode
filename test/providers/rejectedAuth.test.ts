@@ -49,7 +49,7 @@ describe("Qwen on a refused token", () => {
     const p = new QwenProvider();
     // The live browser has nothing newer to offer.
     Object.assign(p, {
-      browser: { readToken: async () => OLD, close: async () => undefined },
+      browser: { readFreshToken: async () => OLD, close: async () => undefined },
       apiClient: { createChat },
     });
     return { p, secrets };
@@ -67,6 +67,31 @@ describe("Qwen on a refused token", () => {
     expect(await secrets.get("ai-free-vscode.qwen.token")).toBeUndefined();
     expect(await p.isAuthenticated(secrets as never)).toBe(false);
     expect(changed).toBe(1);
+  });
+
+  it("renews a token that is about to expire before opening the chat", async () => {
+    const jwt = (minutes: number, tag: string) =>
+      `eyJhbGciOiJIUzI1NiJ9.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + minutes * 60, tag })).toString("base64url")}.sig`;
+    const expiring = jwt(0.3, "old");
+    const renewed = jwt(15, "new");
+    const secrets = memorySecrets({ "ai-free-vscode.qwen.token": expiring });
+    const used: string[] = [];
+    const p = new QwenProvider();
+    Object.assign(p, {
+      browser: { readFreshToken: async () => renewed, close: async () => undefined },
+      apiClient: {
+        createChat: async (token: string) => {
+          used.push(token);
+          return "chat-1";
+        },
+        sendMessageStream: async function* () {
+          yield { type: "text", content: "ok" };
+        },
+      },
+    });
+    expect((await ask(p, secrets)).text).toBe("ok");
+    expect(used).toEqual([renewed]);
+    expect(await secrets.get("ai-free-vscode.qwen.token")).toBe(renewed);
   });
 
   it("keeps it on a bare 403", async () => {
