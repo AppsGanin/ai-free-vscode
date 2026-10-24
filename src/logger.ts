@@ -1,12 +1,26 @@
 import { AsyncLocalStorage } from "async_hooks";
-import * as vscode from "vscode";
 
 type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
 
-let channel: vscode.OutputChannel | undefined;
+/** Where lines go: VS Code's output channel, or the host's console. */
+export interface LogSink {
+  appendLine(line: string): void;
+}
 
-export function setOutputChannel(output: vscode.OutputChannel): void {
+let channel: LogSink | undefined;
+
+export function setOutputChannel(output: LogSink): void {
   channel = output;
+}
+
+/**
+ * Whether DEBUG lines are wanted. The host installs its own switch (VS Code
+ * reads `freeAI.debug`); it is asked on every line, so a toggle needs no reload.
+ */
+let debugSwitch: () => boolean = () => false;
+
+export function setDebugSwitch(enabled: () => boolean): void {
+  debugSwitch = enabled;
 }
 
 /** Lines kept for the debug report: enough for a few failed requests. */
@@ -33,10 +47,7 @@ export function newRequestId(): string {
   return Math.random().toString(36).slice(2, 6);
 }
 
-/**
- * DEBUG is printed only with `freeAI.debug` on; other levels always are. The
- * setting is read lazily and never cached, so the toggle works without reload.
- */
+/** DEBUG is printed only while the debug switch is on; other levels always are. */
 function write(level: LogLevel, message: string): void {
   if (level === "DEBUG" && !isDebugEnabled()) return;
   const ts = new Date().toISOString().slice(11, 23); // HH:MM:SS.mmm
@@ -90,9 +101,7 @@ export function redact(text: string): string {
  */
 export function isDebugEnabled(): boolean {
   try {
-    return vscode.workspace
-      .getConfiguration("freeAI")
-      .get<boolean>("debug", false);
+    return debugSwitch();
   } catch {
     return false;
   }

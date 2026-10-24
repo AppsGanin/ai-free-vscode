@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
-import { log, setOutputChannel } from "./logger";
+import { log, setDebugSwitch, setOutputChannel } from "./logger";
+import { setHostSettings } from "./providers/common/hostSettings";
 import type { BaseAIProvider } from "./providers/BaseAIProvider";
 import { UnifiedProvider } from "./providers/UnifiedProvider";
 import { DeepSeekProvider } from "./providers/deepseek/DeepSeekProvider";
@@ -21,6 +22,7 @@ import { logEnvironment, registerDebugReport } from "./vscode/DebugReport";
 import { setFeatureBackend } from "./vscode/ModelPicker";
 import { registerSettingsPanel } from "./vscode/SettingsPanel";
 import { VSCodeLMAdapter } from "./vscode/VSCodeLMAdapter";
+import { vscodeDebugSwitch, vscodeHostSettings } from "./vscode/hostSettings";
 
 // Which sub-providers end up in the build is decided by esbuild
 // (PROVIDER_<NAME>=false, see esbuild.js + providerConfig.ts). To add one,
@@ -36,6 +38,8 @@ export function activate(context: vscode.ExtensionContext): void {
   const channel = vscode.window.createOutputChannel("AI Free VSCode");
   context.subscriptions.push(channel);
   setOutputChannel(channel);
+  setDebugSwitch(vscodeDebugSwitch);
+  setHostSettings(vscodeHostSettings);
   log("[extension] activated");
 
   const subProviders = enabledProviders().map((key) =>

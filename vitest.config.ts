@@ -12,6 +12,8 @@ export default defineConfig({
   },
   test: {
     environment: "node",
+    // Wires the providers to the VS Code stand-in, as activation does.
+    setupFiles: ["test/setup.ts"],
     // Live tests talk to the real services and need accounts: opt-in only.
     include: live ? ["test/live/**/*.test.ts"] : ["test/**/*.test.ts"],
     exclude: live ? [] : ["test/live/**"],

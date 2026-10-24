@@ -2,8 +2,8 @@ import * as os from "os";
 import * as path from "path";
 import type { BrowserContext, LaunchOptions, Page } from "playwright";
 import { chromium } from "playwright";
-import * as vscode from "vscode";
 import { createLogger, errToString } from "../../logger";
+import { hostSettings } from "./hostSettings";
 
 const log = createLogger("browser");
 
@@ -13,9 +13,7 @@ export function profileDir(name: string): string {
 }
 
 export function loginTimeoutMs(): number {
-  return vscode.workspace
-    .getConfiguration("freeAI")
-    .get<number>("playwright.timeout", 120000);
+  return hostSettings().loginTimeoutMs();
 }
 
 export interface LaunchProfileOptions extends LaunchOptions {
@@ -78,10 +76,7 @@ function trackProxy(
   context.on("close", () => running.delete(context));
   if (!watchingProxy) {
     watchingProxy = true;
-    vscode.workspace.onDidChangeConfiguration((event) => {
-      if (!event.affectsConfiguration("freeAI.proxy") && !event.affectsConfiguration("http.proxy")) {
-        return;
-      }
+    hostSettings().onProxyChange(() => {
       const now = proxyKey(browserProxy());
       for (const [ctx, key] of running) {
         if (key === now) continue;
@@ -94,25 +89,20 @@ function trackProxy(
 }
 
 /**
- * Proxy for the browser windows: `freeAI.proxy`, else VS Code's `http.proxy`.
+ * Proxy for the browser windows, from the host's settings.
  *
  * Requests made from Node (DeepSeek, Kimi, Qwen's direct path) already go
- * through VS Code's proxy support for extension `fetch`; the browsers are a
- * separate process and need it handed over explicitly. With only `http.proxy`
- * set, both halves therefore leave through the same proxy.
+ * through the host's proxy support for `fetch`; the browsers are a separate
+ * process and need it handed over explicitly.
  */
 export function browserProxy(): LaunchOptions["proxy"] | undefined {
-  const own = vscode.workspace
-    .getConfiguration("freeAI")
-    .get<string>("proxy", "")
-    .trim();
-  const http = vscode.workspace.getConfiguration("http");
-  const raw = own || http.get<string>("proxy", "").trim();
+  const raw = hostSettings().proxy().trim();
   // A typo must not take every provider down; the browsers go direct.
   const proxy = raw ? parseProxy(raw) : undefined;
   if (!proxy) return undefined;
 
-  const bypass = (http.get<string[]>("noProxy", []) ?? [])
+  const bypass = hostSettings()
+    .noProxy()
     .map((host) => host.trim())
     .filter(Boolean)
     .join(",");

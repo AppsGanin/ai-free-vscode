@@ -21,7 +21,7 @@ import type {
   AIStreamChunk,
   AIToolDefinition,
 } from "../providers/types";
-import { vsCodeMessageToAI } from "../providers/types";
+import { vsCodeMessageToAI } from "./messages";
 
 // Light buffering: smoother rendering, and a chance to look ahead before
 // committing characters to the chat.
