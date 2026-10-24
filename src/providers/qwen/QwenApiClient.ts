@@ -22,6 +22,7 @@ import {
 } from "../types";
 import type { QwenBrowserBridge } from "./QwenBrowserBridge";
 import { QWEN_MODELS, resolveModelId } from "./QwenModels";
+import { refreshWebVersion, webVersion } from "./QwenWebVersion";
 
 const ORIGIN = "https://chat.qwen.ai";
 const CHAT_API_URL = `${ORIGIN}/api/v2/chat/completions`;
@@ -31,8 +32,7 @@ const PROVIDER_ID = "ai-free-vscode-qwen";
 
 // App headers sent by chat.qwen.ai. Judging by the traffic these (source /
 // version / x-request-id), not the heavy bx-* signature, are the WAF gate.
-// The versions drift over time.
-const WEB_VERSION = "0.2.68";
+// `version` drifts with every web release and is read live (QwenWebVersion).
 const BX_V = "2.5.37";
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -108,7 +108,7 @@ function appHeaders(token: string, referer: string): Record<string, string> {
     Accept: "*/*",
     "Accept-Language": "en-US,en;q=0.9",
     source: "web",
-    version: WEB_VERSION,
+    version: webVersion(),
     "bx-v": BX_V,
     "x-request-id": crypto.randomUUID(),
     // As in the app: Date().toString() without the parenthesised zone name,
@@ -215,6 +215,7 @@ export class QwenApiClient {
     const model = resolveModelId(params.model);
     let chatId = params.chatId;
 
+    await refreshWebVersion();
     if (!chatId) {
       chatId = await this.createChat(bearer, model);
       log(`[qwen-api] created chat_id=${chatId}`);
@@ -368,6 +369,8 @@ export class QwenApiClient {
       const dropped = isNetworkFailure(error);
       const internal = /internal error/i.test(msg);
       if (dropped || internal) {
+        // A stale client version is refused with exactly this error.
+        if (internal) await refreshWebVersion(true);
         const fresh = await inFreshChat(
           dropped
             ? `connection failed (${errToString(error)})`

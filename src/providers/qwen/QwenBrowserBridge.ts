@@ -3,12 +3,12 @@ import { createLogger, errToString, isDebugEnabled } from "../../logger";
 import { STEALTH_INIT } from "../common/stealth";
 import { AuthExpiredError, ProviderError, RateLimitError } from "../types";
 import { launchQwenContext } from "./QwenBrowser";
+import { webVersion } from "./QwenWebVersion";
 
 const PROVIDER_ID = "ai-free-vscode-qwen";
 const HOME_URL = "https://chat.qwen.ai";
 const SINK_BINDING = "__qwenSseSink";
 // App headers of the web client (see appHeaders in QwenApiClient).
-const WEB_VERSION = "0.2.68";
 const BX_V = "2.5.37";
 
 // Timeouts so the bridge fails with a clear error instead of hanging forever.
@@ -667,7 +667,7 @@ function inPageHeaders(token: string): Record<string, string> {
     Accept: "*/*",
     "Accept-Language": "en-US,en;q=0.9",
     source: "web",
-    version: WEB_VERSION,
+    version: webVersion(),
     "bx-v": BX_V,
     "x-request-id": crypto.randomUUID(),
     timezone: new Date().toString().replace(/\s*\(.*\)\s*$/, ""),

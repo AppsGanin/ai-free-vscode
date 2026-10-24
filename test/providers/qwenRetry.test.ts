@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { QwenApiClient } from "../../src/providers/qwen/QwenApiClient";
 import type { QwenBrowserBridge } from "../../src/providers/qwen/QwenBrowserBridge";
+import { resetWebVersion, webVersion } from "../../src/providers/qwen/QwenWebVersion";
 import { collect, sse } from "../helpers";
 
 const answer = (content: string) => ({
@@ -26,7 +27,9 @@ function scriptFetch(script: { chats?: Reply[]; completions: Reply[]; stop?: Rep
     vi.fn(async (input: string) => {
       const url = String(input);
       let reply: Reply;
-      if (url.includes("/chats/new")) {
+      if (url === "https://chat.qwen.ai/") {
+        reply = new Response('<script src="//assets.alicdn.com/g/qwenweb/qwen-chat-fe/9.9.9/js/main.js">');
+      } else if (url.includes("/chats/new")) {
         calls.push("chats/new");
         reply = take(script.chats, () => json({ success: true, data: { id: `chat-${++chat}` } }));
       } else if (url.includes("/completions/stop")) {
@@ -58,6 +61,7 @@ const send = (client = new QwenApiClient(), onChatIdChanged?: (id: string) => vo
   );
 
 afterEach(() => {
+  resetWebVersion();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -87,6 +91,23 @@ describe("Qwen recovery", () => {
     expect(calls).toEqual(["chats/new", "completions chat-1", "chats/new", "completions chat-2"]);
     // The provider caches chat ids per conversation and must learn the new one.
     expect(changed).toEqual(["chat-2"]);
+  });
+
+  it("re-reads the web version and moves to a new chat after an internal error", async () => {
+    const calls = scriptFetch({
+      completions: [
+        json({ success: false, data: { code: "Bad_Request", details: "Internal error..." } }),
+        stream(answer("ok")),
+      ],
+    });
+    const fetchMock = vi.mocked(fetch);
+    expect((await send()).text).toBe("ok");
+    expect(calls).toEqual(["chats/new", "completions chat-1", "chats/new", "completions chat-2"]);
+    expect(webVersion()).toBe("9.9.9");
+    const versions = fetchMock.mock.calls
+      .filter(([url]) => String(url).includes("/completions"))
+      .map(([, init]) => (init?.headers as Record<string, string>).version);
+    expect(versions).toEqual(["9.9.9", "9.9.9"]);
   });
 
   it("falls back to the browser session when the WAF blocks the direct stream", async () => {

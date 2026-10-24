@@ -12,6 +12,7 @@ import {
   resolveDeepSeekModelId,
   toDeepSeekApiModelType,
 } from "./DeepSeekModels";
+import { appVersion, refreshAppVersion } from "./DeepSeekWebVersion";
 
 const PROVIDER_ID = "ai-free-vscode-deepseek";
 const BASE_URL = "https://chat.deepseek.com";
@@ -19,7 +20,6 @@ const CREATE_SESSION_PATH = "/api/v0/chat_session/create";
 const CREATE_POW_CHALLENGE_PATH = "/api/v0/chat/create_pow_challenge";
 const COMPLETION_PATH = "/api/v0/chat/completion";
 const STOP_STREAM_PATH = "/api/v0/chat/stop_stream";
-const APP_VERSION = "2.2.0";
 const DEEPSEEK_SHA3_WASM =
   "https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm";
 
@@ -145,6 +145,7 @@ export class DeepSeekApiClient {
       `[deepseek-api] request model=${modelType} thinking=${thinking} hasTools=${hasTools}`,
     );
 
+    await refreshAppVersion(auth.cookieHeader);
     const response = await fetch(`${BASE_URL}${COMPLETION_PATH}`, {
       method: "POST",
       headers: {
@@ -406,6 +407,7 @@ export class DeepSeekApiClient {
     body: unknown,
     abortSignal?: AbortSignal,
   ): Promise<DeepSeekResponseJson> {
+    await refreshAppVersion(auth.cookieHeader);
     const response = await fetch(`${BASE_URL}${path}`, {
       method: "POST",
       headers: this.buildHeaders(auth),
@@ -461,9 +463,9 @@ export class DeepSeekApiClient {
       Origin: BASE_URL,
       Referer: `${BASE_URL}/`,
       Cookie: auth.cookieHeader,
-      "X-App-Version": APP_VERSION,
+      "X-App-Version": appVersion(),
       "x-client-platform": "web",
-      "x-client-version": APP_VERSION,
+      "x-client-version": appVersion(),
       "x-client-locale": "en",
       "x-client-timezone-offset": String(-new Date().getTimezoneOffset() * 60),
       // Cookies alone are not enough: without the Bearer the API answers 40002.
