@@ -15,7 +15,7 @@ export default defineConfig({
     // Wires the providers to the VS Code stand-in, as activation does.
     setupFiles: ["test/setup.ts"],
     // Live tests talk to the real services and need accounts: opt-in only.
-    include: live ? ["test/live/**/*.test.ts"] : ["test/**/*.test.ts"],
+    include: live ? ["test/live/**/*.test.ts"] : ["test/**/*.test.ts", "dsh-plugin/test/**/*.test.ts"],
     exclude: live ? [] : ["test/live/**"],
     testTimeout: live ? 240_000 : 10_000,
     hookTimeout: live ? 120_000 : 10_000,

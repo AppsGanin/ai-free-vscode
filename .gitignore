@@ -9,3 +9,4 @@ dist/
 *.vsix
 .DS_Store
 test/live/.reports/
+dsh-plugin/lib/

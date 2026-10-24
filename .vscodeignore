@@ -23,3 +23,6 @@ tsconfig.json
 media/*.gif
 test/**
 vitest.config.ts
+
+# Плагин DeepSeek Harness — отдельный npm-пакет
+dsh-plugin/**
