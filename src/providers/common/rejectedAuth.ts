@@ -1,4 +1,4 @@
-import type * as vscode from "vscode";
+import type { SecretStore } from "../types";
 
 /**
  * Deletes a stored sign-in the server has just refused, so the next request
@@ -11,7 +11,7 @@ import type * as vscode from "vscode";
  * @returns whether the secret was removed.
  */
 export async function forgetRejected(
-  secrets: vscode.SecretStorage,
+  secrets: SecretStore,
   key: string,
   isRejected: (stored: string) => boolean,
 ): Promise<boolean> {

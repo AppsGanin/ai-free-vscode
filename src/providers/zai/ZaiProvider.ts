@@ -1,7 +1,7 @@
-import * as vscode from "vscode";
 import { createLogger } from "../../logger";
 import { BaseAIProvider } from "../BaseAIProvider";
-import type { AIModelInfo, AIRequestParams, AIStreamChunk } from "../types";
+import { hostSettings } from "../common/hostSettings";
+import type { AIModelInfo, AIRequestParams, AIStreamChunk, SecretStore } from "../types";
 import { AuthExpiredError } from "../types";
 import { ZaiApiClient } from "./ZaiApiClient";
 import { ZaiAuthManager } from "./ZaiAuthManager";
@@ -16,12 +16,8 @@ export class ZaiProvider extends BaseAIProvider {
 
   private readonly authManager = new ZaiAuthManager();
   private readonly bridge = new ZaiBrowserBridge(
-    (message) => {
-      void vscode.window.showWarningMessage(message);
-    },
-    vscode.workspace
-      .getConfiguration("freeAI")
-      .get<"auto" | "headed" | "headless">("zai.browserMode", "auto"),
+    (message) => hostSettings().notify(message),
+    hostSettings().browserMode("zai"),
   );
   private readonly apiClient = new ZaiApiClient(this.bridge);
 
@@ -29,11 +25,11 @@ export class ZaiProvider extends BaseAIProvider {
     return ZAI_MODELS;
   }
 
-  async isAuthenticated(secrets: vscode.SecretStorage): Promise<boolean> {
+  async isAuthenticated(secrets: SecretStore): Promise<boolean> {
     return this.authManager.isAuthenticated(secrets);
   }
 
-  async login(secrets: vscode.SecretStorage): Promise<void> {
+  async login(secrets: SecretStore): Promise<void> {
     // Sign-in and the bridge share one Chrome profile, which only one browser
     // process may hold.
     await this.bridge.close();
@@ -41,7 +37,7 @@ export class ZaiProvider extends BaseAIProvider {
     this._onDidAuthChange.fire();
   }
 
-  async logout(secrets: vscode.SecretStorage): Promise<void> {
+  async logout(secrets: SecretStore): Promise<void> {
     await this.bridge.close();
     await this.authManager.logout(secrets);
     this._onDidAuthChange.fire();
@@ -49,7 +45,7 @@ export class ZaiProvider extends BaseAIProvider {
 
   async *sendMessageStream(
     params: AIRequestParams,
-    secrets: vscode.SecretStorage,
+    secrets: SecretStore,
   ): AsyncIterable<AIStreamChunk> {
     const auth = await this.authManager.getAuth(secrets);
     if (!auth) {

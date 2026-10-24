@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import type { HostSettings } from "../providers/common/hostSettings";
+import type { BrowserMode, HostSettings } from "../providers/common/hostSettings";
 
 /**
  * Provider settings from the VS Code configuration: `freeAI.proxy`, else VS
@@ -26,6 +26,13 @@ export const vscodeHostSettings: HostSettings = {
         listener();
       }
     });
+  },
+  browserMode: (provider) =>
+    vscode.workspace
+      .getConfiguration("freeAI")
+      .get<BrowserMode>(`${provider}.browserMode`, "auto"),
+  notify: (message) => {
+    void vscode.window.showWarningMessage(message);
   },
 };
 

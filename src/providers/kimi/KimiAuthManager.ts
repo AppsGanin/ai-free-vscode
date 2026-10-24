@@ -1,6 +1,5 @@
 import { rm } from "fs/promises";
 import type { Page } from "playwright";
-import * as vscode from "vscode";
 import { createLogger, errToString } from "../../logger";
 import {
   launchLoginContext,
@@ -11,6 +10,7 @@ import {
   readLocalStorage,
 } from "../common/browserAuth";
 import { forgetRejected, storedToken } from "../common/rejectedAuth";
+import type { SecretStore } from "../types";
 
 const AUTH_SECRET_KEY = "ai-free-vscode.kimi.auth";
 // Kimi runs two regions with separate accounts: kimi.ai (global) and kimi.com
@@ -33,7 +33,7 @@ export interface KimiAuthPayload {
 }
 
 export class KimiAuthManager {
-  async login(secrets: vscode.SecretStorage): Promise<void> {
+  async login(secrets: SecretStore): Promise<void> {
     const timeoutMs = loginTimeoutMs();
     klog.info("login: opening browser");
     const context = await launchLoginContext(BROWSER_DATA_DIR);
@@ -103,7 +103,7 @@ export class KimiAuthManager {
     }
   }
 
-  async logout(secrets: vscode.SecretStorage): Promise<void> {
+  async logout(secrets: SecretStore): Promise<void> {
     await secrets.delete(AUTH_SECRET_KEY);
     await rm(BROWSER_DATA_DIR, { recursive: true, force: true }).catch(
       () => {},
@@ -112,7 +112,7 @@ export class KimiAuthManager {
   }
 
   /** Drops the sign-in holding `rejected` after the server refused it. */
-  async forget(secrets: vscode.SecretStorage, rejected: string): Promise<void> {
+  async forget(secrets: SecretStore, rejected: string): Promise<void> {
     if (
       await forgetRejected(
         secrets,
@@ -124,12 +124,12 @@ export class KimiAuthManager {
     }
   }
 
-  async isAuthenticated(secrets: vscode.SecretStorage): Promise<boolean> {
+  async isAuthenticated(secrets: SecretStore): Promise<boolean> {
     return !!(await this.getAuth(secrets));
   }
 
   async getAuth(
-    secrets: vscode.SecretStorage,
+    secrets: SecretStore,
   ): Promise<KimiAuthPayload | undefined> {
     const raw = await secrets.get(AUTH_SECRET_KEY);
     if (!raw) return undefined;

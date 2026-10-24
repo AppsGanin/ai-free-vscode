@@ -1,6 +1,5 @@
 import { rm } from "fs/promises";
 import type { BrowserContext, Response } from "playwright";
-import * as vscode from "vscode";
 import { createLogger, errToString } from "../../logger";
 import {
   launchLoginContext,
@@ -11,6 +10,7 @@ import {
   readLocalStorage,
 } from "../common/browserAuth";
 import { forgetRejected } from "../common/rejectedAuth";
+import type { SecretStore } from "../types";
 
 const AUTH_SECRET_KEY = "ai-free-vscode.deepseek.auth";
 const HOME_URL = "https://chat.deepseek.com";
@@ -24,7 +24,7 @@ interface DeepSeekAuthPayload {
 }
 
 export class DeepSeekAuthManager {
-  async login(secrets: vscode.SecretStorage): Promise<void> {
+  async login(secrets: SecretStore): Promise<void> {
     const timeoutMs = loginTimeoutMs();
     dlog.info("login: opening browser");
     const context = await launchLoginContext(BROWSER_DATA_DIR);
@@ -90,7 +90,7 @@ export class DeepSeekAuthManager {
     }
   }
 
-  async logout(secrets: vscode.SecretStorage): Promise<void> {
+  async logout(secrets: SecretStore): Promise<void> {
     await secrets.delete(AUTH_SECRET_KEY);
     await rm(BROWSER_DATA_DIR, { recursive: true, force: true }).catch(
       () => {},
@@ -103,7 +103,7 @@ export class DeepSeekAuthManager {
    * cookie session, the part every stored sign-in has; the Bearer is optional.
    */
   async forget(
-    secrets: vscode.SecretStorage,
+    secrets: SecretStore,
     rejected: DeepSeekAuthPayload,
   ): Promise<void> {
     const matches = (stored: string) => {
@@ -119,12 +119,12 @@ export class DeepSeekAuthManager {
     }
   }
 
-  async isAuthenticated(secrets: vscode.SecretStorage): Promise<boolean> {
+  async isAuthenticated(secrets: SecretStore): Promise<boolean> {
     return !!(await this.getAuth(secrets));
   }
 
   async getAuth(
-    secrets: vscode.SecretStorage,
+    secrets: SecretStore,
   ): Promise<DeepSeekAuthPayload | undefined> {
     const raw = await secrets.get(AUTH_SECRET_KEY);
     if (!raw) return undefined;

@@ -1,8 +1,8 @@
-import * as vscode from "vscode";
 import { log } from "../../logger";
 import { BaseAIProvider } from "../BaseAIProvider";
+import { hostSettings } from "../common/hostSettings";
 import { conversationKey } from "../common/messages";
-import type { AIModelInfo, AIRequestParams, AIStreamChunk } from "../types";
+import type { AIModelInfo, AIRequestParams, AIStreamChunk, SecretStore } from "../types";
 import { AuthExpiredError } from "../types";
 import { QwenApiClient } from "./QwenApiClient";
 import { QwenAuthManager } from "./QwenAuthManager";
@@ -15,12 +15,8 @@ export class QwenProvider extends BaseAIProvider {
 
   private readonly authManager = new QwenAuthManager();
   private readonly browser = new QwenBrowserBridge(
-    (message) => {
-      void vscode.window.showWarningMessage(message);
-    },
-    vscode.workspace
-      .getConfiguration("freeAI")
-      .get<"auto" | "headed" | "headless">("qwen.browserMode", "auto"),
+    (message) => hostSettings().notify(message),
+    hostSettings().browserMode("qwen"),
   );
   private readonly apiClient = new QwenApiClient(this.browser);
   private readonly chatIdByConversation = new Map<string, string>();
@@ -29,11 +25,11 @@ export class QwenProvider extends BaseAIProvider {
     return QWEN_MODELS;
   }
 
-  async isAuthenticated(secrets: vscode.SecretStorage): Promise<boolean> {
+  async isAuthenticated(secrets: SecretStore): Promise<boolean> {
     return this.authManager.isAuthenticated(secrets);
   }
 
-  async login(secrets: vscode.SecretStorage): Promise<void> {
+  async login(secrets: SecretStore): Promise<void> {
     // A persistent profile cannot be opened by two contexts at once: shut the
     // bridge down before the interactive sign-in.
     await this.browser.close();
@@ -41,7 +37,7 @@ export class QwenProvider extends BaseAIProvider {
     this._onDidAuthChange.fire();
   }
 
-  async logout(secrets: vscode.SecretStorage): Promise<void> {
+  async logout(secrets: SecretStore): Promise<void> {
     await this.browser.close();
     await this.authManager.logout(secrets);
     this.chatIdByConversation.clear();
@@ -50,7 +46,7 @@ export class QwenProvider extends BaseAIProvider {
 
   async *sendMessageStream(
     params: AIRequestParams,
-    secrets: vscode.SecretStorage,
+    secrets: SecretStore,
   ): AsyncIterable<AIStreamChunk> {
     const token = await this.authManager.getToken(secrets);
     if (!token) {
@@ -89,7 +85,7 @@ export class QwenProvider extends BaseAIProvider {
 
   /** The server refused `token`: never send it again, show Sign In. */
   private async rejected(
-    secrets: vscode.SecretStorage,
+    secrets: SecretStore,
     token: string,
     err: AuthExpiredError,
   ): Promise<void> {
@@ -136,7 +132,7 @@ export class QwenProvider extends BaseAIProvider {
 
   /** Reads a fresh token from the live browser session; undefined if unchanged. */
   private async tryRefreshToken(
-    secrets: vscode.SecretStorage,
+    secrets: SecretStore,
     current: string,
   ): Promise<string | undefined> {
     const raw = await this.browser.readToken().catch(() => undefined);

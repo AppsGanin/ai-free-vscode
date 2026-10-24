@@ -1,4 +1,16 @@
 
+// ─── Storage ────────────────────────────────────────────────────────────────
+
+/**
+ * Where sign-ins are kept: VS Code's SecretStorage, or the host's own store.
+ * The providers only ever need these three calls.
+ */
+export interface SecretStore {
+  get(key: string): PromiseLike<string | undefined>;
+  store(key: string, value: string): PromiseLike<void>;
+  delete(key: string): PromiseLike<void>;
+}
+
 // ─── Models ─────────────────────────────────────────────────────────────────
 
 export interface AIModelCapabilities {

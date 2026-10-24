@@ -1,6 +1,5 @@
 import { rm } from "fs/promises";
 import type { Page } from "playwright";
-import * as vscode from "vscode";
 import { createLogger, errToString } from "../../logger";
 import {
   launchLoginContext,
@@ -11,6 +10,7 @@ import {
 } from "../common/browserAuth";
 import { forgetRejected, storedToken } from "../common/rejectedAuth";
 import { BROWSER_DATA_DIR, HOME_URL } from "./ZaiBrowser";
+import type { SecretStore } from "../types";
 
 const AUTH_SECRET_KEY = "ai-free-vscode.zai.auth";
 
@@ -29,7 +29,7 @@ export interface ZaiAuthPayload {
  * lets the bridge notice when the browser session no longer matches.
  */
 export class ZaiAuthManager {
-  async login(secrets: vscode.SecretStorage): Promise<void> {
+  async login(secrets: SecretStore): Promise<void> {
     const timeoutMs = loginTimeoutMs();
     zlog.info("login: opening browser");
     const context = await launchLoginContext(BROWSER_DATA_DIR);
@@ -77,7 +77,7 @@ export class ZaiAuthManager {
     }
   }
 
-  async logout(secrets: vscode.SecretStorage): Promise<void> {
+  async logout(secrets: SecretStore): Promise<void> {
     await secrets.delete(AUTH_SECRET_KEY);
     await rm(BROWSER_DATA_DIR, { recursive: true, force: true }).catch(
       () => {},
@@ -86,7 +86,7 @@ export class ZaiAuthManager {
   }
 
   /** Drops the sign-in holding `rejected` after the server refused it. */
-  async forget(secrets: vscode.SecretStorage, rejected: string): Promise<void> {
+  async forget(secrets: SecretStore, rejected: string): Promise<void> {
     if (
       await forgetRejected(
         secrets,
@@ -98,12 +98,12 @@ export class ZaiAuthManager {
     }
   }
 
-  async isAuthenticated(secrets: vscode.SecretStorage): Promise<boolean> {
+  async isAuthenticated(secrets: SecretStore): Promise<boolean> {
     return !!(await this.getAuth(secrets));
   }
 
   async getAuth(
-    secrets: vscode.SecretStorage,
+    secrets: SecretStore,
   ): Promise<ZaiAuthPayload | undefined> {
     const raw = await secrets.get(AUTH_SECRET_KEY);
     if (!raw) return undefined;

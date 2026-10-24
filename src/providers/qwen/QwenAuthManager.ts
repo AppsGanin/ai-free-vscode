@@ -1,6 +1,5 @@
 import { rm } from "fs/promises";
 import type { Page } from "playwright";
-import * as vscode from "vscode";
 import { createLogger, errToString } from "../../logger";
 import {
   loginTimeoutMs,
@@ -9,6 +8,7 @@ import {
 } from "../common/browserAuth";
 import { forgetRejected } from "../common/rejectedAuth";
 import { BROWSER_DATA_DIR, launchQwenContext } from "./QwenBrowser";
+import type { SecretStore } from "../types";
 
 const TOKEN_SECRET_KEY = "ai-free-vscode.qwen.token";
 const AUTH_URL = "https://chat.qwen.ai/auth?action=signin";
@@ -27,7 +27,7 @@ export class QwenAuthManager {
    * Opens the sign-in page in a real browser with a persistent profile (Google
    * OAuth refuses automated ones), waits for a token and closes the window.
    */
-  async login(secrets: vscode.SecretStorage): Promise<void> {
+  async login(secrets: SecretStore): Promise<void> {
     const timeoutMs = loginTimeoutMs();
     qlog.info("login: opening browser");
     const context = await launchQwenContext({ headless: false });
@@ -74,7 +74,7 @@ export class QwenAuthManager {
     }
   }
 
-  async logout(secrets: vscode.SecretStorage): Promise<void> {
+  async logout(secrets: SecretStore): Promise<void> {
     await secrets.delete(TOKEN_SECRET_KEY);
     // Also drop the browser profile so the next login does not silently reuse
     // the old web session.
@@ -85,7 +85,7 @@ export class QwenAuthManager {
   }
 
   /** Drops `rejected` after the server refused it; see forgetRejected. */
-  async forget(secrets: vscode.SecretStorage, rejected: string): Promise<void> {
+  async forget(secrets: SecretStore, rejected: string): Promise<void> {
     if (
       await forgetRejected(
         secrets,
@@ -97,17 +97,17 @@ export class QwenAuthManager {
     }
   }
 
-  async isAuthenticated(secrets: vscode.SecretStorage): Promise<boolean> {
+  async isAuthenticated(secrets: SecretStore): Promise<boolean> {
     return !!(await this.getToken(secrets));
   }
 
-  async getToken(secrets: vscode.SecretStorage): Promise<string | undefined> {
+  async getToken(secrets: SecretStore): Promise<string | undefined> {
     return normalizeToken(await secrets.get(TOKEN_SECRET_KEY));
   }
 
   /** Stores a token refreshed from the live browser session. */
   async saveToken(
-    secrets: vscode.SecretStorage,
+    secrets: SecretStore,
     raw: string | undefined,
   ): Promise<string | undefined> {
     const token = normalizeToken(raw);

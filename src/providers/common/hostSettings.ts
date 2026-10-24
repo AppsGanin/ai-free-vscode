@@ -13,13 +13,21 @@ export interface HostSettings {
   noProxy(): string[];
   /** Subscribes to changes of `proxy()` / `noProxy()`. */
   onProxyChange(listener: () => void): void;
+  /** How the browser bridge of `provider` shows its window. */
+  browserMode(provider: "qwen" | "zai"): BrowserMode;
+  /** A warning the user should see now (a captcha window opened, ...). */
+  notify(message: string): void;
 }
+
+export type BrowserMode = "auto" | "headed" | "headless";
 
 const DEFAULTS: HostSettings = {
   loginTimeoutMs: () => 120000,
   proxy: () => "",
   noProxy: () => [],
   onProxyChange: () => undefined,
+  browserMode: () => "auto",
+  notify: () => undefined,
 };
 
 let current = DEFAULTS;

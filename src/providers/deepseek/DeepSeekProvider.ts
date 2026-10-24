@@ -1,4 +1,3 @@
-import * as vscode from "vscode";
 import { errToString, log } from "../../logger";
 import { BaseAIProvider } from "../BaseAIProvider";
 import { isAbortError, isNetworkFailure } from "../common/http";
@@ -7,7 +6,7 @@ import {
   contentToString,
   conversationKey,
 } from "../common/messages";
-import type { AIModelInfo, AIRequestParams, AIStreamChunk } from "../types";
+import type { AIModelInfo, AIRequestParams, AIStreamChunk, SecretStore } from "../types";
 import { AuthExpiredError, RateLimitError } from "../types";
 import type { DeepSeekAuthState } from "./DeepSeekApiClient";
 import { DeepSeekApiClient, MAX_PROMPT_TOKENS } from "./DeepSeekApiClient";
@@ -166,16 +165,16 @@ export class DeepSeekProvider extends BaseAIProvider {
     return DEEPSEEK_MODELS;
   }
 
-  async isAuthenticated(secrets: vscode.SecretStorage): Promise<boolean> {
+  async isAuthenticated(secrets: SecretStore): Promise<boolean> {
     return this.authManager.isAuthenticated(secrets);
   }
 
-  async login(secrets: vscode.SecretStorage): Promise<void> {
+  async login(secrets: SecretStore): Promise<void> {
     await this.authManager.login(secrets);
     this._onDidAuthChange.fire();
   }
 
-  async logout(secrets: vscode.SecretStorage): Promise<void> {
+  async logout(secrets: SecretStore): Promise<void> {
     await this.authManager.logout(secrets);
     this.sessionIdByConversation.clear();
     this.parentMessageIdByConversation.clear();
@@ -186,7 +185,7 @@ export class DeepSeekProvider extends BaseAIProvider {
 
   async *sendMessageStream(
     params: AIRequestParams,
-    secrets: vscode.SecretStorage,
+    secrets: SecretStore,
   ): AsyncIterable<AIStreamChunk> {
     const auth = await this.authManager.getAuth(secrets);
     if (!auth) {

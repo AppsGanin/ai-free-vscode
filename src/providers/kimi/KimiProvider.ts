@@ -1,7 +1,6 @@
-import * as vscode from "vscode";
 import { createLogger } from "../../logger";
 import { BaseAIProvider } from "../BaseAIProvider";
-import type { AIModelInfo, AIRequestParams, AIStreamChunk } from "../types";
+import type { AIModelInfo, AIRequestParams, AIStreamChunk, SecretStore } from "../types";
 import { AuthExpiredError } from "../types";
 import { KimiApiClient } from "./KimiApiClient";
 import { KimiAuthManager } from "./KimiAuthManager";
@@ -20,23 +19,23 @@ export class KimiProvider extends BaseAIProvider {
     return KIMI_MODELS;
   }
 
-  async isAuthenticated(secrets: vscode.SecretStorage): Promise<boolean> {
+  async isAuthenticated(secrets: SecretStore): Promise<boolean> {
     return this.authManager.isAuthenticated(secrets);
   }
 
-  async login(secrets: vscode.SecretStorage): Promise<void> {
+  async login(secrets: SecretStore): Promise<void> {
     await this.authManager.login(secrets);
     this._onDidAuthChange.fire();
   }
 
-  async logout(secrets: vscode.SecretStorage): Promise<void> {
+  async logout(secrets: SecretStore): Promise<void> {
     await this.authManager.logout(secrets);
     this._onDidAuthChange.fire();
   }
 
   async *sendMessageStream(
     params: AIRequestParams,
-    secrets: vscode.SecretStorage,
+    secrets: SecretStore,
   ): AsyncIterable<AIStreamChunk> {
     const auth = await this.authManager.getAuth(secrets);
     if (!auth) {
