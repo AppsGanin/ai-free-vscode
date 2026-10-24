@@ -5,7 +5,7 @@ import { maskHeadless, STEALTH_INIT } from "../common/stealth";
 import { AuthExpiredError, ProviderError, RateLimitError } from "../types";
 import { sessionKind } from "./ZaiAuthManager";
 import { ZaiRequestGate } from "./ZaiRequestGate";
-import { BROWSER_DATA_DIR, HOME_URL } from "./ZaiBrowser";
+import { browserDataDir, HOME_URL } from "./ZaiBrowser";
 
 const PROVIDER_ID = "ai-free-vscode-zai";
 const SINK_BINDING = "__zaiSink";
@@ -447,7 +447,7 @@ export class ZaiBrowserBridge {
     const headless = this.mode === "headless";
     blog.info(`launching browser bridge (mode=${this.mode})`);
     const context = await withTimeout(
-      launchPersistentProfile(BROWSER_DATA_DIR, {
+      launchPersistentProfile(browserDataDir(), {
         headless,
         viewport: { width: 1280, height: 800 },
         args: headless ? LAUNCH_ARGS : [...LAUNCH_ARGS, ...OFFSCREEN_ARGS],

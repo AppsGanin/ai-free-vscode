@@ -14,7 +14,7 @@ import type { SecretStore } from "../types";
 
 const AUTH_SECRET_KEY = "ai-free-vscode.deepseek.auth";
 const HOME_URL = "https://chat.deepseek.com";
-const BROWSER_DATA_DIR = profileDir("deepseek-browser-profile");
+const browserDataDir = (): string => profileDir("deepseek-browser-profile");
 
 const dlog = createLogger("deepseek-auth");
 
@@ -27,7 +27,7 @@ export class DeepSeekAuthManager {
   async login(secrets: SecretStore): Promise<void> {
     const timeoutMs = loginTimeoutMs();
     dlog.info("login: opening browser");
-    const context = await launchLoginContext(BROWSER_DATA_DIR);
+    const context = await launchLoginContext(browserDataDir());
     const page = context.pages()[0] ?? (await context.newPage());
 
     try {
@@ -92,7 +92,7 @@ export class DeepSeekAuthManager {
 
   async logout(secrets: SecretStore): Promise<void> {
     await secrets.delete(AUTH_SECRET_KEY);
-    await rm(BROWSER_DATA_DIR, { recursive: true, force: true }).catch(
+    await rm(browserDataDir(), { recursive: true, force: true }).catch(
       () => {},
     );
     dlog.info("logout: token and browser profile cleared");

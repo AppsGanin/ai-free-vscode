@@ -7,7 +7,7 @@ import {
   pollForToken,
 } from "../common/browserAuth";
 import { forgetRejected } from "../common/rejectedAuth";
-import { BROWSER_DATA_DIR, launchQwenContext } from "./QwenBrowser";
+import { browserDataDir, launchQwenContext } from "./QwenBrowser";
 import type { SecretStore } from "../types";
 
 const TOKEN_SECRET_KEY = "ai-free-vscode.qwen.token";
@@ -78,7 +78,7 @@ export class QwenAuthManager {
     await secrets.delete(TOKEN_SECRET_KEY);
     // Also drop the browser profile so the next login does not silently reuse
     // the old web session.
-    await rm(BROWSER_DATA_DIR, { recursive: true, force: true }).catch(
+    await rm(browserDataDir(), { recursive: true, force: true }).catch(
       () => {},
     );
     qlog.info("logout: token and browser profile cleared");

@@ -9,7 +9,7 @@ import {
   readLocalStorage,
 } from "../common/browserAuth";
 import { forgetRejected, storedToken } from "../common/rejectedAuth";
-import { BROWSER_DATA_DIR, HOME_URL } from "./ZaiBrowser";
+import { browserDataDir, HOME_URL } from "./ZaiBrowser";
 import type { SecretStore } from "../types";
 
 const AUTH_SECRET_KEY = "ai-free-vscode.zai.auth";
@@ -32,7 +32,7 @@ export class ZaiAuthManager {
   async login(secrets: SecretStore): Promise<void> {
     const timeoutMs = loginTimeoutMs();
     zlog.info("login: opening browser");
-    const context = await launchLoginContext(BROWSER_DATA_DIR);
+    const context = await launchLoginContext(browserDataDir());
     const page = context.pages()[0] ?? (await context.newPage());
 
     try {
@@ -79,7 +79,7 @@ export class ZaiAuthManager {
 
   async logout(secrets: SecretStore): Promise<void> {
     await secrets.delete(AUTH_SECRET_KEY);
-    await rm(BROWSER_DATA_DIR, { recursive: true, force: true }).catch(
+    await rm(browserDataDir(), { recursive: true, force: true }).catch(
       () => {},
     );
     zlog.info("logout: token and browser profile cleared");

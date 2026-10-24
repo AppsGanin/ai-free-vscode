@@ -1,3 +1,5 @@
+import * as os from "os";
+import * as path from "path";
 import * as vscode from "vscode";
 import type { BrowserMode, HostSettings } from "../providers/common/hostSettings";
 
@@ -7,6 +9,7 @@ import type { BrowserMode, HostSettings } from "../providers/common/hostSettings
  * support) and the browsers leave the same way.
  */
 export const vscodeHostSettings: HostSettings = {
+  profileRoot: () => path.join(os.homedir(), ".ai-free-vscode"),
   loginTimeoutMs: () =>
     vscode.workspace
       .getConfiguration("freeAI")

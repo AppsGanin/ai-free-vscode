@@ -5,7 +5,7 @@ import { launchPersistentProfile, profileDir } from "../common/browserAuth";
  * Shared profile directory. It holds the cookies of the live Qwen session, used
  * both by sign-in and by the browser fallback when the Aliyun WAF blocks us.
  */
-export const BROWSER_DATA_DIR = profileDir("browser-profile");
+export const browserDataDir = (): string => profileDir("browser-profile");
 
 const LAUNCH_ARGS = [
   "--no-sandbox",
@@ -34,7 +34,7 @@ export async function launchQwenContext(options: {
   /** Move the window off-screen (bridge only; sign-in stays visible). */
   offscreen?: boolean;
 }): Promise<BrowserContext> {
-  return launchPersistentProfile(BROWSER_DATA_DIR, {
+  return launchPersistentProfile(browserDataDir(), {
     headless: options.headless,
     viewport: { width: 1280, height: 800 },
     args: options.offscreen ? [...LAUNCH_ARGS, ...OFFSCREEN_ARGS] : LAUNCH_ARGS,

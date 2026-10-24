@@ -1,4 +1,3 @@
-import * as os from "os";
 import * as path from "path";
 import type { BrowserContext, LaunchOptions, Page } from "playwright";
 import { chromium } from "playwright";
@@ -9,7 +8,7 @@ const log = createLogger("browser");
 
 /** Every provider keeps its own browser profile under one root. */
 export function profileDir(name: string): string {
-  return path.join(os.homedir(), ".ai-free-vscode", name);
+  return path.join(hostSettings().profileRoot(), name);
 }
 
 export function loginTimeoutMs(): number {

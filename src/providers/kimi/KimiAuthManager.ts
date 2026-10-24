@@ -21,7 +21,7 @@ const HOME_URL = "https://www.kimi.ai";
 const KIMI_ORIGIN = /^https:\/\/www\.kimi\.(ai|com)$/;
 /** Sessions stored before the host was recorded all came from kimi.com. */
 export const LEGACY_KIMI_ORIGIN = "https://www.kimi.com";
-const BROWSER_DATA_DIR = profileDir("kimi-browser-profile");
+const browserDataDir = (): string => profileDir("kimi-browser-profile");
 
 const klog = createLogger("kimi-auth");
 
@@ -36,7 +36,7 @@ export class KimiAuthManager {
   async login(secrets: SecretStore): Promise<void> {
     const timeoutMs = loginTimeoutMs();
     klog.info("login: opening browser");
-    const context = await launchLoginContext(BROWSER_DATA_DIR);
+    const context = await launchLoginContext(browserDataDir());
     const page = context.pages()[0] ?? (await context.newPage());
 
     try {
@@ -105,7 +105,7 @@ export class KimiAuthManager {
 
   async logout(secrets: SecretStore): Promise<void> {
     await secrets.delete(AUTH_SECRET_KEY);
-    await rm(BROWSER_DATA_DIR, { recursive: true, force: true }).catch(
+    await rm(browserDataDir(), { recursive: true, force: true }).catch(
       () => {},
     );
     klog.info("logout: token and browser profile cleared");

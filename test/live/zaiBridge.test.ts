@@ -19,7 +19,7 @@ import {
 const PROFILE = mkdtempSync(join(tmpdir(), "zai-bridge-test-"));
 vi.mock("../../src/providers/zai/ZaiBrowser", () => ({
   HOME_URL: "https://chat.z.ai",
-  BROWSER_DATA_DIR: PROFILE,
+  browserDataDir: () => PROFILE,
 }));
 
 const { ZaiBrowserBridge } = await import("../../src/providers/zai/ZaiBrowserBridge");
