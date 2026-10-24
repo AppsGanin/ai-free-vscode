@@ -10,6 +10,7 @@ import {
   profileDir,
   readLocalStorage,
 } from "../common/browserAuth";
+import { forgetRejected } from "../common/rejectedAuth";
 
 const AUTH_SECRET_KEY = "ai-free-vscode.deepseek.auth";
 const HOME_URL = "https://chat.deepseek.com";
@@ -95,6 +96,27 @@ export class DeepSeekAuthManager {
       () => {},
     );
     dlog.info("logout: token and browser profile cleared");
+  }
+
+  /**
+   * Drops the sign-in after the server refused `rejected`. Matched on the
+   * cookie session, the part every stored sign-in has; the Bearer is optional.
+   */
+  async forget(
+    secrets: vscode.SecretStorage,
+    rejected: DeepSeekAuthPayload,
+  ): Promise<void> {
+    const matches = (stored: string) => {
+      try {
+        const parsed = JSON.parse(stored) as Partial<DeepSeekAuthPayload>;
+        return String(parsed.cookieHeader ?? "").trim() === rejected.cookieHeader;
+      } catch {
+        return false;
+      }
+    };
+    if (await forgetRejected(secrets, AUTH_SECRET_KEY, matches)) {
+      dlog.info("forget: rejected session removed");
+    }
   }
 
   async isAuthenticated(secrets: vscode.SecretStorage): Promise<boolean> {

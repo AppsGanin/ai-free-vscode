@@ -609,7 +609,7 @@ function isWafBlockPage(status: number, body: string): boolean {
  * available at your level", which must not sign the user out.
  */
 export function httpError(status: number, body: string): Error {
-  if (status === 401) return new AuthExpiredError(PROVIDER_ID);
+  if (status === 401) return new AuthExpiredError(PROVIDER_ID, 401);
   if (status === 429) return new RateLimitError(PROVIDER_ID);
   if (isWafBlockPage(status, body)) {
     return new ProviderError(PROVIDER_ID, WAF_BLOCKED_MESSAGE, status);

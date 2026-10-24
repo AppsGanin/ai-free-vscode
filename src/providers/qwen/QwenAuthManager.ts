@@ -7,6 +7,7 @@ import {
   normalizeToken,
   pollForToken,
 } from "../common/browserAuth";
+import { forgetRejected } from "../common/rejectedAuth";
 import { BROWSER_DATA_DIR, launchQwenContext } from "./QwenBrowser";
 
 const TOKEN_SECRET_KEY = "ai-free-vscode.qwen.token";
@@ -81,6 +82,19 @@ export class QwenAuthManager {
       () => {},
     );
     qlog.info("logout: token and browser profile cleared");
+  }
+
+  /** Drops `rejected` after the server refused it; see forgetRejected. */
+  async forget(secrets: vscode.SecretStorage, rejected: string): Promise<void> {
+    if (
+      await forgetRejected(
+        secrets,
+        TOKEN_SECRET_KEY,
+        (stored) => normalizeToken(stored) === rejected,
+      )
+    ) {
+      qlog.info("forget: rejected token removed");
+    }
   }
 
   async isAuthenticated(secrets: vscode.SecretStorage): Promise<boolean> {

@@ -345,7 +345,7 @@ export class QwenBrowserBridge {
           const ev = events.shift() as SinkEvent;
           switch (ev.t) {
             case "head":
-              if (ev.status === 401) throw new AuthExpiredError(PROVIDER_ID);
+              if (ev.status === 401) throw new AuthExpiredError(PROVIDER_ID, 401);
               if (ev.status === 429) {
                 throw new RateLimitError(
                   PROVIDER_ID,

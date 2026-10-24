@@ -184,7 +184,7 @@ function createChatError(
     );
   }
   // Only 401 means the session itself: 403 is the WAF just as often.
-  if (result.status === 401) return new AuthExpiredError(PROVIDER_ID);
+  if (result.status === 401) return new AuthExpiredError(PROVIDER_ID, 401);
   if (result.status === 429) return new RateLimitError(PROVIDER_ID);
 
   const body = excerpt(result.text);

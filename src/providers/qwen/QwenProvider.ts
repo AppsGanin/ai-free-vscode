@@ -76,15 +76,25 @@ export class QwenProvider extends BaseAIProvider {
           return;
         } catch (retryErr) {
           if (retryErr instanceof AuthExpiredError) {
-            this._onDidAuthChange.fire();
+            await this.rejected(secrets, refreshed, retryErr);
           }
           throw retryErr;
         }
       }
 
-      this._onDidAuthChange.fire();
+      await this.rejected(secrets, token, err);
       throw err;
     }
+  }
+
+  /** The server refused `token`: never send it again, show Sign In. */
+  private async rejected(
+    secrets: vscode.SecretStorage,
+    token: string,
+    err: AuthExpiredError,
+  ): Promise<void> {
+    if (err.rejectsCredential) await this.authManager.forget(secrets, token);
+    this._onDidAuthChange.fire();
   }
 
   /**

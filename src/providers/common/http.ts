@@ -17,7 +17,7 @@ export function throwForStatus(
     );
   }
   if (authStatuses.includes(response.status)) {
-    throw new AuthExpiredError(providerId);
+    throw new AuthExpiredError(providerId, response.status);
   }
   if (response.status === 429) {
     const retryAfter = Number(response.headers.get("retry-after"));
@@ -35,7 +35,7 @@ export function toProviderError(
   text: string,
 ): Error {
   if (status === 401 || status === 403) {
-    return new AuthExpiredError(providerId);
+    return new AuthExpiredError(providerId, status);
   }
   if (status === 429) {
     return new RateLimitError(providerId);

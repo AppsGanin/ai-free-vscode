@@ -102,9 +102,26 @@ export type AIStreamChunk =
 // ─── Errors ─────────────────────────────────────────────────────────────────
 
 export class AuthExpiredError extends Error {
-  constructor(public readonly providerId: string) {
+  /**
+   * @param status HTTP status that carried the refusal, when there was one.
+   * Undefined means the backend said so in words (`unauthorized`, 40002, a
+   * guest session).
+   */
+  constructor(
+    public readonly providerId: string,
+    public readonly status?: number,
+  ) {
     super(`Authentication expired for provider: ${providerId}`);
     this.name = "AuthExpiredError";
+  }
+
+  /**
+   * The server itself refused the credential, so it is dead and must not be
+   * sent again. A bare 403 is as often the anti-bot as the session: deleting
+   * the sign-in on it would sign the user out for nothing.
+   */
+  get rejectsCredential(): boolean {
+    return this.status !== 403;
   }
 }
 

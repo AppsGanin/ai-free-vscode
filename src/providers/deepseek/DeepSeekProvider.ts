@@ -198,6 +198,14 @@ export class DeepSeekProvider extends BaseAIProvider {
       // The wait can outlive the request that was queued.
       if (params.abortSignal?.aborted) return;
       yield* this.streamInSlot(params, auth);
+    } catch (err) {
+      if (err instanceof AuthExpiredError) {
+        // Forgotten before the change event, so listeners already read
+        // "signed out" and offer Sign In instead of resending a dead session.
+        if (err.rejectsCredential) await this.authManager.forget(secrets, auth);
+        this._onDidAuthChange.fire();
+      }
+      throw err;
     } finally {
       release();
     }
@@ -448,9 +456,6 @@ export class DeepSeekProvider extends BaseAIProvider {
       }
     }
 
-    if (lastError instanceof AuthExpiredError) {
-      this._onDidAuthChange.fire();
-    }
     throw lastError;
   }
 }

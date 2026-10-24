@@ -23,6 +23,7 @@ interface Call {
  */
 function provider(script: Step[]) {
   const calls: Call[] = [];
+  const forgotten: unknown[] = [];
   let sessions = 0;
   let messageId = 100;
   const client = {
@@ -48,9 +49,14 @@ function provider(script: Step[]) {
   const p = new DeepSeekProvider();
   Object.assign(p as object, {
     apiClient: client,
-    authManager: { getAuth: async () => ({ token: "t", cookieHeader: "c" }) },
+    authManager: {
+      getAuth: async () => ({ token: "t", cookieHeader: "c" }),
+      forget: async (_secrets: unknown, auth: unknown) => {
+        forgotten.push(auth);
+      },
+    },
   });
-  return { p, calls };
+  return { p, calls, forgotten };
 }
 
 const secrets = {} as never;
@@ -172,9 +178,17 @@ describe("DeepSeek provider recovery", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("does not retry an expired session", async () => {
-    const { p, calls } = provider([new AuthExpiredError("ai-free-vscode-deepseek")]);
+  it("does not retry an expired session, and forgets it", async () => {
+    const { p, calls, forgotten } = provider([new AuthExpiredError("ai-free-vscode-deepseek")]);
     await expect(ask(p)).rejects.toBeInstanceOf(AuthExpiredError);
     expect(calls).toHaveLength(1);
+    // The refused session must not be sent again.
+    expect(forgotten).toEqual([{ token: "t", cookieHeader: "c" }]);
+  });
+
+  it("keeps the session on a bare 403, which is as often the anti-bot", async () => {
+    const { p, forgotten } = provider([new AuthExpiredError("ai-free-vscode-deepseek", 403)]);
+    await expect(ask(p)).rejects.toBeInstanceOf(AuthExpiredError);
+    expect(forgotten).toEqual([]);
   });
 });

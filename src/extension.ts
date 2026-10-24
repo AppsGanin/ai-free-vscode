@@ -123,7 +123,7 @@ function registerAccountCommands(
         },
         async () => {
           try {
-            await provider.login(secrets, providerId);
+            if (!(await provider.signIn(secrets, providerId))) return;
             log(`[${id}] login success`);
             vscode.window.showInformationMessage(
               `${displayName}: signed in successfully!`,

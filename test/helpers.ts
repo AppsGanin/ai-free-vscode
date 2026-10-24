@@ -129,3 +129,15 @@ export function mockFetch(routes: FakeRoute[]): RecordedRequest[] {
 
   return requests;
 }
+
+/** SecretStorage over a Map: enough for the code that stores sign-ins. */
+export function memorySecrets(values: Record<string, string> = {}) {
+  const store = new Map(Object.entries(values));
+  return {
+    get: async (key: string) => store.get(key),
+    store: async (key: string, value: string) => void store.set(key, value),
+    delete: async (key: string) => void store.delete(key),
+    keys: async () => [...store.keys()],
+    onDidChange: () => ({ dispose() {} }),
+  };
+}

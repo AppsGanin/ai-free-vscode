@@ -51,7 +51,8 @@ export class ZaiProvider extends BaseAIProvider {
     params: AIRequestParams,
     secrets: vscode.SecretStorage,
   ): AsyncIterable<AIStreamChunk> {
-    if (!(await this.authManager.getAuth(secrets))) {
+    const auth = await this.authManager.getAuth(secrets);
+    if (!auth) {
       log.warn("sendMessage: not authenticated");
       throw new AuthExpiredError(this.id);
     }
@@ -64,7 +65,7 @@ export class ZaiProvider extends BaseAIProvider {
         // The browser profile is no longer signed in: show the provider as
         // signed out so the user is offered Sign In again.
         log.warn("sendMessage: browser session expired");
-        await this.authManager.forget(secrets);
+        if (err.rejectsCredential) await this.authManager.forget(secrets, auth.token);
         this._onDidAuthChange.fire();
       }
       throw err;

@@ -111,7 +111,30 @@ export class UnifiedProvider extends BaseAIProvider {
     secrets: vscode.SecretStorage,
     providerId?: string,
   ): Promise<void> {
-    await this.pickAndRun("Sign In", providerId, (p) => p.login(secrets));
+    await this.signIn(secrets, providerId);
+  }
+
+  /**
+   * Sign-in as the Sign In command reports it.
+   *
+   * @returns false when the user dismissed the provider picker.
+   * @throws when sign-in finished without a session the provider can read
+   * back: success is reported only once the credential is actually stored.
+   */
+  async signIn(
+    secrets: vscode.SecretStorage,
+    providerId?: string,
+  ): Promise<boolean> {
+    const target = await this.pickAndRun("Sign In", providerId, (p) =>
+      p.login(secrets),
+    );
+    if (!target) return false;
+    if (!(await target.isAuthenticated(secrets))) {
+      throw new Error(
+        `${target.displayName}: the sign-in was not saved. Try again.`,
+      );
+    }
+    return true;
   }
 
   async logout(
@@ -177,7 +200,7 @@ export class UnifiedProvider extends BaseAIProvider {
     action: string,
     providerId: string | undefined,
     run: (provider: BaseAIProvider) => Promise<void>,
-  ): Promise<void> {
+  ): Promise<BaseAIProvider | undefined> {
     let target = providerId
       ? this.providers.find((p) => p.id === providerId)
       : undefined;
@@ -197,7 +220,7 @@ export class UnifiedProvider extends BaseAIProvider {
           ignoreFocusOut: true,
         },
       );
-      if (!selected) return;
+      if (!selected) return undefined;
 
       target = this.providers.find((p) => p.id === selected.value);
       if (!target) throw new Error(`Provider not found: ${selected.value}`);
@@ -205,6 +228,7 @@ export class UnifiedProvider extends BaseAIProvider {
 
     await run(target);
     this._onDidAuthChange.fire();
+    return target;
   }
 
   private collectModels(providers: BaseAIProvider[]): AIModelInfo[] {

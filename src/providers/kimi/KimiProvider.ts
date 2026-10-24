@@ -50,6 +50,8 @@ export class KimiProvider extends BaseAIProvider {
     } catch (err) {
       if (err instanceof AuthExpiredError) {
         log.warn("sendMessage: auth expired mid-request");
+        // A refused token must not be sent again: show Sign In instead.
+        if (err.rejectsCredential) await this.authManager.forget(secrets, auth.token);
         this._onDidAuthChange.fire();
       }
       throw err;

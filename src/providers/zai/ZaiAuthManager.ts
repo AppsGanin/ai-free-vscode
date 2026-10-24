@@ -9,6 +9,7 @@ import {
   pollForToken,
   readLocalStorage,
 } from "../common/browserAuth";
+import { forgetRejected, storedToken } from "../common/rejectedAuth";
 import { BROWSER_DATA_DIR, HOME_URL } from "./ZaiBrowser";
 
 const AUTH_SECRET_KEY = "ai-free-vscode.zai.auth";
@@ -84,9 +85,17 @@ export class ZaiAuthManager {
     zlog.info("logout: token and browser profile cleared");
   }
 
-  /** Drops the stored sign-in but keeps the profile, so re-login is quick. */
-  async forget(secrets: vscode.SecretStorage): Promise<void> {
-    await secrets.delete(AUTH_SECRET_KEY);
+  /** Drops the sign-in holding `rejected` after the server refused it. */
+  async forget(secrets: vscode.SecretStorage, rejected: string): Promise<void> {
+    if (
+      await forgetRejected(
+        secrets,
+        AUTH_SECRET_KEY,
+        (stored) => jwt(storedToken(stored)) === rejected,
+      )
+    ) {
+      zlog.info("forget: rejected token removed");
+    }
   }
 
   async isAuthenticated(secrets: vscode.SecretStorage): Promise<boolean> {

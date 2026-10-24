@@ -10,6 +10,7 @@ import {
   profileDir,
   readLocalStorage,
 } from "../common/browserAuth";
+import { forgetRejected, storedToken } from "../common/rejectedAuth";
 
 const AUTH_SECRET_KEY = "ai-free-vscode.kimi.auth";
 // Kimi runs two regions with separate accounts: kimi.ai (global) and kimi.com
@@ -108,6 +109,19 @@ export class KimiAuthManager {
       () => {},
     );
     klog.info("logout: token and browser profile cleared");
+  }
+
+  /** Drops the sign-in holding `rejected` after the server refused it. */
+  async forget(secrets: vscode.SecretStorage, rejected: string): Promise<void> {
+    if (
+      await forgetRejected(
+        secrets,
+        AUTH_SECRET_KEY,
+        (stored) => jwt(storedToken(stored)) === rejected,
+      )
+    ) {
+      klog.info("forget: rejected token removed");
+    }
   }
 
   async isAuthenticated(secrets: vscode.SecretStorage): Promise<boolean> {
