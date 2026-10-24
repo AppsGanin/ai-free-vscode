@@ -1,22 +1,25 @@
 import { aliasResolver } from "../common/models";
 import type { AIModelInfo } from "../types";
 
-// Kimi (Moonshot) web app — kimi.ai (global) or kimi.com (China) — flagship K2.5 only.
+// Kimi (Moonshot) web app — kimi.ai (global) or kimi.com (China). One entry:
+// the plain chat model the web app offers right now (K2.6 Instant on kimi.ai),
+// read from its model list (KimiChatModel). The agent models (K3, K2.8 "OK
+// Computer") live inside Kimi's own server sandbox and are left out.
 export const KIMI_MODELS: AIModelInfo[] = [
   {
-    id: "kimi-k2.5",
-    name: "Kimi K2.5",
+    id: "kimi-instant",
+    name: "Kimi Instant",
     family: "Kimi",
     maxInputTokens: 131072,
     maxOutputTokens: 16384,
-    // Kept out of chat. Short tool sessions work, but once the context grows
-    // (a long file read) K2.5 escapes into its server-side code interpreter:
-    // the agent test saw 33 hidden ipython calls, a project rebuilt in Kimi's
-    // own sandbox and a confident "all fixed" — with nothing changed here.
+    // Kimi still reaches for its own server-side ipython/shell on long tool
+    // sessions; KimiApiClient hands those calls to the caller's command tool
+    // or asks again (the agent test: 23 turns, 22 calls, all on our side).
     capabilities: {
       streaming: true,
       thinking: true,
-      chat: false,
+      toolCalling: true,
+      chat: true,
       commit: true,
       suggestions: true,
       fix: true,
@@ -25,9 +28,11 @@ export const KIMI_MODELS: AIModelInfo[] = [
 ];
 
 export const resolveKimiModelId = aliasResolver({
-  kimi: "kimi-k2.5",
-  "kimi-k2": "kimi-k2.5",
-  k2: "kimi-k2.5",
-  "k2.5": "kimi-k2.5",
-  default: "kimi-k2.5",
+  kimi: "kimi-instant",
+  // Saved settings from before the model list was read.
+  "kimi-k2.5": "kimi-instant",
+  "kimi-k2": "kimi-instant",
+  k2: "kimi-instant",
+  "k2.5": "kimi-instant",
+  default: "kimi-instant",
 });

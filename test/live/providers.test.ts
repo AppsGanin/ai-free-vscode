@@ -124,7 +124,7 @@ const SUITES: Suite[] = [
   { provider: "qwen", create: () => new QwenProvider(), models: ["qwen3.8-max"], tools: true },
   { provider: "deepseek", create: () => new DeepSeekProvider(), models: ["deepseek-default"], tools: true },
   // Kimi is kept out of chat (see README); only its plain answers are checked.
-  { provider: "kimi", create: () => new KimiProvider(), models: ["kimi-k2.5"], tools: false },
+  { provider: "kimi", create: () => new KimiProvider(), models: ["kimi-instant"], tools: true },
   { provider: "zai", create: () => new ZaiProvider(), models: ["glm-5.3", "glm-4.7"], tools: true },
 ];
 

@@ -1,6 +1,7 @@
 import type { Context } from "@deepseek-ai/cordis";
 import Schema from "@deepseek-ai/schemastery";
 import { DeepSeekProvider } from "../../src/providers/deepseek/DeepSeekProvider";
+import { KimiProvider } from "../../src/providers/kimi/KimiProvider";
 import { QwenProvider } from "../../src/providers/qwen/QwenProvider";
 import { ZaiProvider } from "../../src/providers/zai/ZaiProvider";
 import { FreeAiAdapter, type Route } from "./adapter";
@@ -9,7 +10,7 @@ import { FileSecretStore, installHost } from "./host";
 export const name = "free-ai";
 export const inject = ["llm"];
 
-type RouteKey = "qwen" | "deepseek" | "zai";
+type RouteKey = "qwen" | "deepseek" | "kimi" | "zai";
 
 export interface Config {
   providers: RouteKey[];
@@ -21,8 +22,8 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
-  providers: Schema.array(Schema.union(["qwen", "deepseek", "zai"]))
-    .default(["qwen", "deepseek", "zai"])
+  providers: Schema.array(Schema.union(["qwen", "deepseek", "kimi", "zai"]))
+    .default(["qwen", "deepseek", "kimi", "zai"])
     .description("Web backends to offer as model providers."),
   autoSignIn: Schema.boolean()
     .default(true)
@@ -38,6 +39,7 @@ export const Config: Schema<Config> = Schema.object({
 const BACKENDS: Record<RouteKey, { id: string; create: () => Route["provider"] }> = {
   qwen: { id: "qwen-web", create: () => new QwenProvider() },
   deepseek: { id: "deepseek-web", create: () => new DeepSeekProvider() },
+  kimi: { id: "kimi-web", create: () => new KimiProvider() },
   zai: { id: "zai-web", create: () => new ZaiProvider() },
 };
 

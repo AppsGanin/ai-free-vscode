@@ -53,12 +53,8 @@ interface Suite {
 const SUITES: Suite[] = [
   { provider: "qwen", create: () => new QwenProvider(), model: "qwen3.8-max" },
   { provider: "deepseek", create: () => new DeepSeekProvider(), model: "deepseek-default" },
-  // Kimi is not offered for chat: on a long context it runs its own
-  // server-side sandbox instead of our tools (see README). KIMI_AGENT=1 runs
-  // it anyway, to see whether that has changed.
-  ...(process.env.KIMI_AGENT === "1"
-    ? [{ provider: "kimi" as const, create: () => new KimiProvider(), model: "kimi-k2.5" }]
-    : []),
+  // Kimi's own server-side tools are handed to ours or refused (KimiApiClient).
+  { provider: "kimi", create: () => new KimiProvider(), model: "kimi-instant" },
   { provider: "zai", create: () => new ZaiProvider(), model: "glm-5.3" },
   { provider: "zai", create: () => new ZaiProvider(), model: "glm-4.7" },
 ];

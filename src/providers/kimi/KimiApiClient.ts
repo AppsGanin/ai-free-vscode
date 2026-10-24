@@ -4,16 +4,16 @@ import { buildFlatTranscript } from "../common/messages";
 import { thinkingEnabled } from "../common/models";
 import { readChunks } from "../common/stream";
 import { StreamingToolCallRouter } from "../common/StreamingToolCallRouter";
-import { buildToolsSystemPrompt } from "../common/ToolCalling";
-import type { AIRequestParams, AIStreamChunk } from "../types";
+import { buildToolsSystemPrompt, createToolCallChunk } from "../common/ToolCalling";
+import type { AIRequestParams, AIStreamChunk, AIToolDefinition } from "../types";
 import { ProviderError } from "../types";
+import { chatTarget } from "./KimiChatModel";
 import { KIMI_MODELS, resolveKimiModelId } from "./KimiModels";
 
 const PROVIDER_ID = "ai-free-vscode-kimi";
 /** Used when the session does not say which region it belongs to. */
 const DEFAULT_ORIGIN = "https://www.kimi.com";
 const CHAT_PATH = "/apiv2/kimi.gateway.chat.v1.ChatService/Chat";
-const SCENARIO = "SCENARIO_K2D5";
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const STREAM_TIMEOUT_MS = 120000;
@@ -27,7 +27,91 @@ const MAX_PROMPT_TOKENS = 75000;
 /** Connect protocol frame header: 1 flag byte + 4 length bytes. */
 const FRAME_HEADER_BYTES = 5;
 
+/**
+ * Kimi runs its own tools (ipython, shell, browser) on its servers, and no
+ * request field turns them off. With the caller's tools on offer such a call
+ * is an escape: the work would happen in Kimi's sandbox, with none of the
+ * user's files. A command or Python run is handed to the caller's own command
+ * tool instead — it is what the model meant to do, just in the wrong place;
+ * anything else is asked again with a reminder.
+ */
+const SERVER_TOOL_RETRIES = 2;
+
 const log = createLogger("kimi-api");
+
+/** The model reached for one of Kimi's own server-side tools. */
+class ServerToolEscape extends Error {
+  constructor(
+    readonly tool: string,
+    /** The call's JSON arguments, as far as they arrived. */
+    readonly args: string,
+  ) {
+    super(`Kimi started its own ${tool} tool`);
+  }
+}
+
+function serverToolReminder(commandTool: string | undefined): string {
+  return (
+    "IMPORTANT: your built-in tools (ipython, shell, browser, web search, files) are NOT available here: " +
+    "they run on a remote machine that has none of the user's files. Act only through the tools listed above, " +
+    "in the tool_call format." +
+    (commandTool ? ` To run a command, tests or code, call ${commandTool}.` : "")
+  );
+}
+
+/** The caller's tool that runs a shell command, and its command parameter. */
+function commandToolOf(
+  tools: readonly AIToolDefinition[] | undefined,
+): { tool: AIToolDefinition; param: string } | undefined {
+  for (const tool of tools ?? []) {
+    if (!/terminal|bash|shell|run_command|execute_command|^exec$/i.test(tool.name)) continue;
+    const props = (tool.parameters as { properties?: Record<string, { type?: string }> }).properties ?? {};
+    const param = ["command", "cmd", "script"].find((key) => props[key]?.type === "string");
+    if (param) return { tool, param };
+  }
+  return undefined;
+}
+
+/**
+ * Kimi's shell/ipython call as a call of the caller's command tool, or
+ * undefined when it cannot be carried over (other tools, or code that works
+ * on Kimi's own sandbox files under /mnt).
+ */
+export function translateServerCall(
+  tool: string,
+  rawArgs: string,
+  tools: readonly AIToolDefinition[] | undefined,
+): AIStreamChunk | undefined {
+  const target = commandToolOf(tools);
+  if (!target) return undefined;
+  let args: { command?: unknown; code?: unknown };
+  try {
+    args = JSON.parse(rawArgs) as typeof args;
+  } catch {
+    return undefined;
+  }
+  let command: string | undefined;
+  if (tool === "shell" && typeof args.command === "string") command = args.command;
+  else if (tool === "ipython" && typeof args.code === "string") {
+    command = `python3 - <<'PY'\n${args.code}\nPY`;
+  }
+  if (!command?.trim() || /\/mnt\//.test(command)) return undefined;
+
+  const input: Record<string, unknown> = { [target.param]: command };
+  // Whatever else the tool requires (run_in_terminal: explanation,
+  // isBackground) gets a neutral value.
+  const schema = target.tool.parameters as {
+    properties?: Record<string, { type?: string }>;
+    required?: string[];
+  };
+  for (const key of schema.required ?? []) {
+    if (key in input) continue;
+    const type = schema.properties?.[key]?.type;
+    if (type === "string") input[key] = "Run the command the model asked for";
+    else if (type === "boolean") input[key] = false;
+  }
+  return createToolCallChunk({ name: target.tool.name, argumentsValue: input });
+}
 
 export interface KimiAuthState {
   token: string;
@@ -68,61 +152,111 @@ export class KimiApiClient {
       params.thinkingMode,
     );
 
-    const content = buildFlatTranscript(
-      params.messages,
-      hasTools ? buildToolsSystemPrompt(params.tools ?? []) : "",
-      { maxTokens: MAX_PROMPT_TOKENS },
-    );
-
-    log.info(
-      `request model=${modelId} thinking=${thinking} hasTools=${hasTools} contentChars=${content.length}`,
-    );
-
     const origin = auth.origin ?? DEFAULT_ORIGIN;
-    const response = await fetch(`${origin}${CHAT_PATH}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${auth.token}`,
-        "Content-Type": "application/connect+json",
-        "Connect-Protocol-Version": "1",
-        Accept: "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        Origin: origin,
-        Referer: `${origin}/`,
-        "User-Agent": USER_AGENT,
-        "X-Msh-Platform": "web",
-      },
-      body: encodeFrame(
-        JSON.stringify({
-          scenario: SCENARIO,
-          chat_id: "",
-          tools: [],
-          message: {
-            parent_id: "",
-            role: "user",
-            blocks: [{ message_id: "", text: { content } }],
-            scenario: SCENARIO,
-          },
-          options: { thinking },
-        }),
-      ),
-      signal: params.abortSignal,
-    });
+    const target = await chatTarget(origin, auth.token);
 
-    log.debug(`response status=${response.status}`);
-    throwForStatus(PROVIDER_ID, response);
+    for (let attempt = 0; ; attempt++) {
+      const reminder =
+        attempt > 0 ? `\n\n${serverToolReminder(commandToolOf(params.tools)?.tool.name)}` : "";
+      const content =
+        buildFlatTranscript(
+          params.messages,
+          hasTools ? buildToolsSystemPrompt(params.tools ?? []) : "",
+          { maxTokens: MAX_PROMPT_TOKENS },
+        ) + reminder;
 
-    if (!response.ok || !response.body) {
-      const txt = await response.text().catch(() => "");
-      log.error(`request failed HTTP ${response.status}: ${txt.slice(0, 220)}`);
-      throw new ProviderError(
-        PROVIDER_ID,
-        `HTTP ${response.status}: ${txt.slice(0, 220)}`,
-        response.status,
+      log.info(
+        `request model=${modelId} target=${target.model ?? target.scenario} thinking=${thinking} hasTools=${hasTools} contentChars=${content.length}${
+          attempt > 0 ? ` retry=${attempt}` : ""
+        }`,
       );
-    }
 
-    yield* this.parseFrames(response.body, allowToolCalls, params.abortSignal);
+      // Our own signal as well: a server-tool turn is cut short here.
+      const controller = new AbortController();
+      const onAbort = () => controller.abort();
+      params.abortSignal?.addEventListener("abort", onAbort, { once: true });
+
+      let shown = false;
+      try {
+        const response = await fetch(`${origin}${CHAT_PATH}`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${auth.token}`,
+            "Content-Type": "application/connect+json",
+            "Connect-Protocol-Version": "1",
+            Accept: "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            Origin: origin,
+            Referer: `${origin}/`,
+            "User-Agent": USER_AGENT,
+            "X-Msh-Platform": "web",
+          },
+          body: encodeFrame(
+            JSON.stringify({
+              scenario: target.scenario,
+              chat_id: "",
+              tools: [],
+              message: {
+                parent_id: "",
+                role: "user",
+                blocks: [{ message_id: "", text: { content } }],
+                scenario: target.scenario,
+              },
+              options: { thinking, ...(target.model ? { model: target.model } : {}) },
+            }),
+          ),
+          signal: controller.signal,
+        });
+
+        log.debug(`response status=${response.status}`);
+        throwForStatus(PROVIDER_ID, response);
+
+        if (!response.ok || !response.body) {
+          const txt = await response.text().catch(() => "");
+          log.error(`request failed HTTP ${response.status}: ${txt.slice(0, 220)}`);
+          throw new ProviderError(
+            PROVIDER_ID,
+            `HTTP ${response.status}: ${txt.slice(0, 220)}`,
+            response.status,
+          );
+        }
+
+        for await (const chunk of this.parseFrames(
+          response.body,
+          allowToolCalls,
+          params.abortSignal,
+        )) {
+          if (chunk.type === "text" || chunk.type === "tool_call") shown = true;
+          yield chunk;
+        }
+        return;
+      } catch (err) {
+        if (!(err instanceof ServerToolEscape)) throw err;
+        controller.abort();
+        const handedOver = translateServerCall(err.tool, err.args, params.tools);
+        if (handedOver?.type === "tool_call") {
+          log.info(`${err.message} — handing it to ${handedOver.name} on the user's side`);
+          yield handedOver;
+          return;
+        }
+        log.debug(`server ${err.tool} args: ${err.args.slice(0, 300)}`);
+        if (shown) {
+          // Asking again would repeat what the user already saw: the turn
+          // ends on its text, and the next one starts clean.
+          log.warn(`${err.message} after answering — ending the turn there`);
+          return;
+        }
+        if (attempt >= SERVER_TOOL_RETRIES) {
+          throw new ProviderError(
+            PROVIDER_ID,
+            `Kimi kept reaching for its own server-side ${err.tool} instead of the provided tools`,
+          );
+        }
+        log.info(`${err.message} — cut before it ran, asking again with a reminder`);
+      } finally {
+        params.abortSignal?.removeEventListener("abort", onAbort);
+      }
+    }
   }
 
   private async *parseFrames(
@@ -138,6 +272,10 @@ export class KimiApiClient {
     let thinkingChars = 0;
     let nativeToolCalls = 0;
     let done = false;
+    /** A server tool call being streamed, before Kimi starts it. */
+    let escape: { name: string; args: string } | undefined;
+    /** The last frames, for the log when a stream carries nothing. */
+    const lastFrames: string[] = [];
 
     const handleFrame = function* (frame: KimiFrame): Iterable<AIStreamChunk> {
       if (frame.error) {
@@ -149,9 +287,23 @@ export class KimiApiClient {
       }
       if (frame.heartbeat) return;
 
-      // Kimi's own code-interpreter runs server-side and keeps generating, so we
-      // just wait for the resulting text and only count the calls.
       if (frame.block?.tool) {
+        const tool = frame.block.tool as { name?: string; args?: string; status?: string };
+        // With the caller's tools on offer, Kimi's own (server-side) tools are
+        // an escape. Its arguments stream in first; they are taken whole,
+        // then the stream is cut.
+        if (allowToolCalls) {
+          if (tool.name) escape = { name: tool.name, args: "" };
+          if (escape && typeof tool.args === "string") {
+            escape.args = frame.op === "append" ? escape.args + tool.args : tool.args;
+          }
+          if (escape && (tool.status === "STATUS_RUNNING" || tool.status === "STATUS_DONE")) {
+            throw new ServerToolEscape(escape.name, escape.args);
+          }
+          return;
+        }
+        // In a plain chat it runs server-side and keeps generating, so we
+        // just wait for the resulting text and only count the calls.
         if (frame.op === "set") nativeToolCalls++;
         return;
       }
@@ -200,10 +352,12 @@ export class KimiApiClient {
           offset = end;
 
           if (payload) {
+            lastFrames.push(payload.slice(0, 200));
+            if (lastFrames.length > 4) lastFrames.shift();
             try {
               yield* handleFrame(JSON.parse(payload) as KimiFrame);
             } catch (err) {
-              if (err instanceof ProviderError) throw err;
+              if (err instanceof ProviderError || err instanceof ServerToolEscape) throw err;
               log.debug(`frame parse failed: ${payload.slice(0, 120)}`);
             }
           }
@@ -224,13 +378,16 @@ export class KimiApiClient {
       log.debug("stream aborted by caller");
     }
 
+    // The stream ended inside a server tool call: still an escape.
+    if (escape) throw new ServerToolEscape(escape.name, escape.args);
+
     yield* router.finish();
 
     log.info(
       `stream done textChars=${textChars} thinkingChars=${thinkingChars} nativeToolCalls=${nativeToolCalls}`,
     );
     if (textChars === 0 && thinkingChars === 0) {
-      log.warn("stream finished without content");
+      log.warn(`stream finished without content — last frames: ${lastFrames.join(" | ")}`);
     }
   }
 }

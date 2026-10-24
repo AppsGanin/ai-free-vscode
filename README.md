@@ -66,17 +66,21 @@ dead entries that fail on use.
 
 ### Kimi
 
-| Model     | ID          | Context |
-| --------- | ----------- | ------- |
-| Kimi K2.5 | `kimi-k2.5` | 128K    |
+| Model        | ID             | Context |
+| ------------ | -------------- | ------- |
+| Kimi Instant | `kimi-instant` | 128K    |
 
-> ⚠️ **Kimi is kept out of Copilot Chat** (`chat: false`). Short tool
-> sessions work, but once the context grows K2.5 escapes into its own
-> server-side code interpreter: it recreates the project in Kimi's sandbox,
-> "fixes" it there and reports success while nothing changed in your
-> workspace (seen in the agent test: 33 hidden `ipython` calls in one turn).
-> It stays available for commit messages, inline suggestions and Quick Fix,
-> where no tools are involved.
+Kimi Instant is whatever plain chat model the Kimi web app offers at the
+moment (K2.6 Instant on kimi.ai); the extension reads it from Kimi's own model
+list. The agent models (K3, K2.8) run inside Kimi's server-side sandbox and are
+not offered.
+
+> **How Kimi is kept on your tools.** Kimi has its own server-side tools
+> (`ipython`, `shell`) that no request option turns off, and on long sessions
+> it reaches for them — the work would then happen in Kimi's sandbox, with none
+> of your files. The extension stops such a call before Kimi runs it: a command
+> or Python run goes to your terminal tool instead (with the usual
+> confirmation), anything else is asked again with a reminder.
 
 
 ### Z.ai

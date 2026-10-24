@@ -1,6 +1,6 @@
 # dsh-plugin-free-ai
 
-Qwen, DeepSeek and Z.ai web chats as model providers for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), signed in with your own browser account. The same provider core as the [AI Free VSCode](https://github.com/AppsGanin/ai-free-vscode) extension.
+Qwen, DeepSeek, Kimi and Z.ai web chats as model providers for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), signed in with your own browser account. The same provider core as the [AI Free VSCode](https://github.com/AppsGanin/ai-free-vscode) extension.
 
 > Unofficial. It drives the providers' web chats the way their own web apps do; their terms of service apply, and a change on their side can break it until the plugin is updated.
 
@@ -12,7 +12,7 @@ dsh plugin --profile <name> add dsh-plugin-free-ai
 
 ## Use
 
-Model routes: `qwen-web`, `deepseek-web`, `zai-web`. Point the agent at one in the profile's `cordis.patch.yml`:
+Model routes: `qwen-web`, `deepseek-web`, `kimi-web`, `zai-web`. Point the agent at one in the profile's `cordis.patch.yml`:
 
 ```yaml
 - id: agent-default-model
@@ -36,7 +36,7 @@ The first request to a route without a session opens that provider's sign-in win
 ```yaml
 - id: free-ai
   config:
-    providers: [qwen, deepseek, zai]   # routes to register
+    providers: [qwen, deepseek, kimi, zai]   # routes to register
     autoSignIn: true                   # open the sign-in window when there is no session
     browserMode: auto                  # auto | headed | headless (Qwen and Z.ai bridges)
     loginTimeoutMs: 300000
@@ -48,4 +48,4 @@ The first request to a route without a session opens that provider's sign-in win
 
 Everything lives under `~/.ai-free-vscode/dsh/`: the browser profiles (separate from the VS Code extension's, as Chrome opens a profile in one process at a time), `sessions.json` with the sign-ins (mode 600), and `free-ai.log`.
 
-Kimi is not offered: its web chat does not handle agent tool calls reliably.
+Kimi reaches for its own server-side `ipython`/`shell` on long sessions; such a call is stopped before Kimi runs it and handed to the harness's `bash` tool, or asked again.
