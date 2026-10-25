@@ -5,6 +5,7 @@ import { KimiProvider } from "../../src/providers/kimi/KimiProvider";
 import { QwenProvider } from "../../src/providers/qwen/QwenProvider";
 import { ZaiProvider } from "../../src/providers/zai/ZaiProvider";
 import { FreeAiAdapter, type Route } from "./adapter";
+import { registerCommands } from "./commands";
 import { FileSecretStore, installHost } from "./host";
 
 export const name = "free-ai";
@@ -27,7 +28,7 @@ export const Config: Schema<Config> = Schema.object({
     .description("Web backends to offer as model providers."),
   autoSignIn: Schema.boolean()
     .default(true)
-    .description("Open the provider's sign-in window on the first request without a session."),
+    .description("Open the provider's sign-in window on the first request without a session (otherwise: /free-ai login)."),
   browserMode: Schema.union(["auto", "headed", "headless"])
     .default("auto")
     .description("How the Qwen and Z.ai browser bridges show their window."),
@@ -49,13 +50,16 @@ export function apply(ctx: Context, config: Config): void {
 
   const routes: Route[] = config.providers.map((key) => {
     const provider = BACKENDS[key].create();
-    return { id: BACKENDS[key].id, name: provider.displayName, provider };
+    return { key, id: BACKENDS[key].id, name: provider.displayName, provider };
   });
   const adapter = new FreeAiAdapter(routes, new FileSecretStore(), config.autoSignIn);
   ctx.llm.registerAdapter(
     routes.map((route) => route.id),
     adapter,
   );
+  // Interactive UIs (Web, Desktop, TUI) compose the commands service;
+  // headless runs do not, and then there is simply no command.
+  ctx.inject(["commands"], (commandsCtx) => registerCommands(commandsCtx, adapter, routes));
 
   // Closes the browser bridges when the plugin unloads or the harness stops.
   ctx.effect(

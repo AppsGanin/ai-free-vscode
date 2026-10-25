@@ -37,9 +37,21 @@ Model routes: `qwen-web`, `deepseek-web`, `kimi-web`, `zai-web`. Point the agent
 
 `agent-default-model` matters as well: other parts of the harness (session titles, subagents) use it, and its shipped default is the paid `deepseek-official` route, which fails without an API key.
 
-The first request to a route without a session opens that provider's sign-in window; sign in once and the request continues. Qwen may also ask for a captcha in a browser window now and then, more often for a new profile.
+Qwen and Z.ai may ask for a captcha in a browser window now and then, more often for a new profile; solve it there and the request continues.
 
 Models: `qwen3.8-max`, `qwen3.7-plus`, `qwen3.7-max`, `qwen3.6-plus`, `qwen3.5-plus` (Qwen); `deepseek-default`, `deepseek-expert` (DeepSeek); `kimi-instant` (Kimi); `glm-5.3`, `glm-5.2`, `glm-5.3-flash`, `glm-4.7` (Z.ai). The harness model picker lists them per route.
+
+## Signing in and out
+
+The first request to a route without a session opens that provider's sign-in window by itself. To manage sessions ahead of time, use the `/free-ai` command in the chat input of an open session (Web, Desktop and TUI; headless runs have no commands):
+
+| Command | Does |
+| --- | --- |
+| `/free-ai status` | Shows which providers are signed in |
+| `/free-ai login qwen` | Opens the Qwen sign-in window in Chrome on the machine DSH runs on, and waits |
+| `/free-ai logout qwen` | Forgets the Qwen session and its browser profile |
+
+Provider names: `qwen`, `deepseek`, `kimi`, `zai`. With `autoSignIn: false` a request without a session fails at once and `/free-ai login` is the only way in.
 
 ## Configuration
 

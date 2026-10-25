@@ -43,7 +43,7 @@ class FakeProvider extends BaseAIProvider {
 }
 
 const adapterFor = (provider: FakeProvider, autoSignIn = true) =>
-  new FreeAiAdapter([{ id: "fake-web", name: provider.displayName, provider }], memorySecrets(), autoSignIn);
+  new FreeAiAdapter([{ key: "fake", id: "fake-web", name: provider.displayName, provider }], memorySecrets(), autoSignIn);
 
 async function run(adapter: FreeAiAdapter, tools = false, signal?: AbortSignal): Promise<StreamChunk[]> {
   const out: StreamChunk[] = [];

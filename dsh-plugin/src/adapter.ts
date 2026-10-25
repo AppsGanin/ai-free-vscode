@@ -28,6 +28,8 @@ const log = createLogger("dsh");
 
 /** One harness route per web backend. */
 export interface Route {
+  /** Short name for commands and config: `qwen`, `deepseek`, `kimi`, `zai`. */
+  key: string;
   /** Route key: `GenerateOptions.provider`. */
   id: string;
   name: string;
@@ -138,32 +140,52 @@ export class FreeAiAdapter extends LlmAdapter {
   }
 
   /**
-   * The harness has no sign-in surface for a plugin route, so the first
-   * request without a session opens the provider's sign-in window and waits.
+   * The first request without a session opens the provider's sign-in window
+   * and waits, unless autoSignIn is off (then `/free-ai login` does it).
    */
   private async ensureSignedIn(route: Route): Promise<void> {
     if (await route.provider.isAuthenticated(this.secrets)) return;
     if (!this.autoSignIn) {
       throw new LlmError(
-        `${route.name}: not signed in. Enable autoSignIn or sign in once with it on.`,
+        `${route.name}: not signed in. Run /free-ai login ${route.key} first.`,
         INVALID_CREDENTIAL_CODE,
       );
     }
+    try {
+      await this.signIn(route);
+    } catch (err) {
+      throw new LlmError(`${route.name}: sign-in failed — ${errMessage(err)}`, INVALID_CREDENTIAL_CODE, { cause: err });
+    }
+  }
+
+  /**
+   * Opens the provider's sign-in window and resolves once the session is
+   * stored. Single-flight per route: a request and `/free-ai login` share one
+   * window.
+   *
+   * @throws when the window was closed, timed out, or nothing was saved.
+   */
+  async signIn(route: Route): Promise<void> {
     let pending = this.signingIn.get(route.id);
     if (!pending) {
-      log.info(`${route.id}: no session, opening the sign-in window`);
+      log.info(`${route.id}: opening the sign-in window`);
       console.error(`[free-ai] ${route.name}: sign in in the browser window that just opened.`);
       pending = route.provider.login(this.secrets).finally(() => this.signingIn.delete(route.id));
       this.signingIn.set(route.id, pending);
     }
-    try {
-      await pending;
-    } catch (err) {
-      throw new LlmError(`${route.name}: sign-in failed — ${errMessage(err)}`, INVALID_CREDENTIAL_CODE, { cause: err });
-    }
+    await pending;
     if (!(await route.provider.isAuthenticated(this.secrets))) {
-      throw new LlmError(`${route.name}: the sign-in was not saved. Try again.`, INVALID_CREDENTIAL_CODE);
+      throw new Error("the sign-in was not saved. Try again.");
     }
+  }
+
+  /** Forgets the session and the route's browser profile. */
+  async signOut(route: Route): Promise<void> {
+    await route.provider.logout(this.secrets);
+  }
+
+  async isSignedIn(route: Route): Promise<boolean> {
+    return route.provider.isAuthenticated(this.secrets);
   }
 }
 
