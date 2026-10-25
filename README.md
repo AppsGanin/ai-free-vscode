@@ -243,13 +243,18 @@ To check auth status:
 
 The same providers also work in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`), DeepSeek's open-source agent harness, through the [`dsh-plugin-free-ai`](https://www.npmjs.com/package/dsh-plugin-free-ai) plugin. It lives in [`dsh-plugin/`](dsh-plugin) and shares this extension's provider code.
 
+It works however you run DSH: the Web UI, the Desktop app, the terminal UI or one-shot headless tasks. A plugin is installed per DSH profile:
+
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add dsh-plugin-free-ai
-npx @deepseek-ai/dsh web
+dsh plugin --profile web add dsh-plugin-free-ai        # dsh web
+dsh plugin --profile tui add dsh-plugin-free-ai        # dsh tui
+dsh plugin --profile headless add dsh-plugin-free-ai   # dsh headless "…"
 ```
 
+In the Desktop app (and the Web UI) the same is **Plugins → Add plugin → `dsh-plugin-free-ai`**. Without a global `dsh`, prefix the commands with `npx @deepseek-ai/`.
+
 - Model routes: `qwen-web`, `deepseek-web`, `kimi-web`, `zai-web`; pick one in the model selector or set it as `agent-default-model`.
-- The first request to a provider opens its sign-in window; `/free-ai status`, `/free-ai login <provider>` and `/free-ai logout <provider>` in an open session manage the sign-ins.
+- The first request to a provider opens its sign-in window; in the Web UI, Desktop and TUI, `/free-ai status`, `/free-ai login <provider>` and `/free-ai logout <provider>` in an open session manage the sign-ins. One sign-in covers every profile.
 - The plugin keeps its own sign-ins and browser profiles under `~/.ai-free-vscode/dsh`, so it runs alongside VS Code.
 
 Requirements, configuration and the model list: [dsh-plugin/README.md](dsh-plugin/README.md). The same [Important notice](#important-notice) applies.

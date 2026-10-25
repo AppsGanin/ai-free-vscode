@@ -12,13 +12,22 @@ Qwen, DeepSeek, Kimi and Z.ai web chats as model providers for [DeepSeek Harness
 
 ## Install
 
-```sh
-dsh plugin --profile <name> add dsh-plugin-free-ai
-```
+DSH keeps each way of running it in its own profile, and a plugin is installed per profile. Install it into the ones you use:
+
+| How you run DSH | Install |
+| --- | --- |
+| Web UI (`dsh web`) | `dsh plugin --profile web add dsh-plugin-free-ai` |
+| Terminal UI (`dsh tui`) | `dsh plugin --profile tui add dsh-plugin-free-ai` |
+| Desktop app | **Plugins** in the sidebar → **Add plugin** → `dsh-plugin-free-ai` |
+| One task and exit (`dsh headless "…"`) | `dsh plugin --profile headless add dsh-plugin-free-ai` |
+
+Without a global install, prefix the commands with `npx @deepseek-ai/`, e.g. `npx @deepseek-ai/dsh plugin --profile web add dsh-plugin-free-ai`. In the Web UI the same **Plugins → Add plugin** page works as in Desktop. Restart DSH after installing.
+
+The sign-ins are shared: every profile reads them from `~/.ai-free-vscode/dsh`, so signing in once covers all of them.
 
 ## Use
 
-Model routes: `qwen-web`, `deepseek-web`, `kimi-web`, `zai-web`. Point the agent at one in the profile's `cordis.patch.yml`:
+Model routes: `qwen-web`, `deepseek-web`, `kimi-web`, `zai-web`. In the Web UI, Desktop and TUI pick a model in the model selector. To make one the default (and for headless runs), set it in the profile's `cordis.patch.yml` (`~/.dsh/profiles/<profile>/cordis.patch.yml`):
 
 ```yaml
 - id: agent-default-model
@@ -43,7 +52,7 @@ Models: `qwen3.8-max`, `qwen3.7-plus`, `qwen3.7-max`, `qwen3.6-plus`, `qwen3.5-p
 
 ## Signing in and out
 
-The first request to a route without a session opens that provider's sign-in window by itself. To manage sessions ahead of time, use the `/free-ai` command in the chat input of an open session (Web, Desktop and TUI; headless runs have no commands):
+The first request to a route without a session opens that provider's sign-in window by itself. To manage sessions ahead of time, use the `/free-ai` command in the chat input of an open session (Web, Desktop and TUI; headless runs have no commands, so sign in from one of those first, or let the first headless request open the window):
 
 | Command | Does |
 | --- | --- |
