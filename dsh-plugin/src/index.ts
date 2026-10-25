@@ -2,6 +2,7 @@ import type { Context } from "@deepseek-ai/cordis";
 import Schema from "@deepseek-ai/schemastery";
 import { DeepSeekProvider } from "../../src/providers/deepseek/DeepSeekProvider";
 import { KimiProvider } from "../../src/providers/kimi/KimiProvider";
+import { log } from "../../src/logger";
 import { QwenProvider } from "../../src/providers/qwen/QwenProvider";
 import { ZaiProvider } from "../../src/providers/zai/ZaiProvider";
 import { FreeAiAdapter, type Route } from "./adapter";
@@ -44,9 +45,14 @@ const BACKENDS: Record<RouteKey, { id: string; create: () => Route["provider"] }
   zai: { id: "zai-web", create: () => new ZaiProvider() },
 };
 
+let applied = 0;
+
 export function apply(ctx: Context, config: Config): void {
   // Before any provider exists: the bridges read their settings when built.
   installHost(config);
+  // Each instance owns its browser bridges; two at once would fight over the
+  // Chrome profiles, so the log says when the harness applies the plugin again.
+  log(`[dsh] plugin applied (#${++applied}) routes=${config.providers.join(",")}`);
 
   const routes: Route[] = config.providers.map((key) => {
     const provider = BACKENDS[key].create();
@@ -64,6 +70,7 @@ export function apply(ctx: Context, config: Config): void {
   // Closes the browser bridges when the plugin unloads or the harness stops.
   ctx.effect(
     () => () => {
+      log(`[dsh] plugin instance disposed — closing its browser bridges`);
       for (const route of routes) route.provider.dispose();
     },
     "free-ai.providers",

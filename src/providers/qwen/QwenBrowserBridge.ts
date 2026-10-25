@@ -294,6 +294,12 @@ export class QwenBrowserBridge {
    */
   async close(): Promise<void> {
     const ctx = this.context;
+    if (ctx) {
+      // Who closed it: a browser closed under a running request is otherwise
+      // a mystery in the log.
+      const caller = (new Error().stack ?? "").split("\n").slice(2, 4).map((f) => f.trim()).join(" ← ");
+      blog.info(`closing the browser bridge (${caller})`);
+    }
     this.context = undefined;
     this.page = undefined;
     this.activeSink = null;
