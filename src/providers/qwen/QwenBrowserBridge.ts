@@ -14,6 +14,10 @@ const BX_V = "2.5.37";
 
 /** How long a reloaded bridge page gets to renew its token. */
 const TOKEN_RENEW_WAIT_MS = 10000;
+/** Reading localStorage takes milliseconds; longer means the page is stuck. */
+const TOKEN_READ_TIMEOUT_MS = 5000;
+/** The whole renewal, reload included: the bridge mutex is held meanwhile. */
+const TOKEN_RENEW_TIMEOUT_MS = 40000;
 
 // Timeouts so the bridge fails with a clear error instead of hanging forever.
 const LAUNCH_TIMEOUT_MS = 45000;
@@ -224,29 +228,42 @@ export class QwenBrowserBridge {
   async readFreshToken(): Promise<string | undefined> {
     const release = await this.acquire("token");
     try {
-      const current = await this.readToken();
-      if (current && !expiresSoon(current)) return current;
-      const page = await this.ensureLivePage();
-      blog.info("token expiring — reloading the bridge page so the app renews it");
-      await this.navigateAndClearWaf(page, true);
-      const deadline = Date.now() + TOKEN_RENEW_WAIT_MS;
-      while (Date.now() < deadline) {
-        const token = await this.readToken();
-        if (token && token !== current && !expiresSoon(token)) return token;
-        await sleep(500);
-      }
-      blog.warn("the bridge page did not renew the token");
-      return current;
+      // Bounded as a whole: the bridge mutex is held here, and every stream
+      // waits behind it.
+      return await withTimeout(this.renewToken(), TOKEN_RENEW_TIMEOUT_MS, "token renewal");
+    } catch (err) {
+      blog.warn(`token renewal failed: ${errToString(err)}`);
+      return undefined;
     } finally {
       release();
     }
+  }
+
+  private async renewToken(): Promise<string | undefined> {
+    const current = await this.readToken();
+    if (current && !expiresSoon(current)) return current;
+    const page = await this.ensureLivePage();
+    blog.info("token expiring — reloading the bridge page so the app renews it");
+    await this.navigateAndClearWaf(page, true);
+    const deadline = Date.now() + TOKEN_RENEW_WAIT_MS;
+    while (Date.now() < deadline) {
+      const token = await this.readToken();
+      if (token && token !== current && !expiresSoon(token)) {
+        blog.info("token renewed by the bridge page");
+        return token;
+      }
+      await sleep(500);
+    }
+    blog.warn("the bridge page did not renew the token");
+    return current;
   }
 
   /** Reads the current Bearer token from the live session (localStorage). */
   async readToken(): Promise<string | undefined> {
     try {
       const page = await this.ensurePage();
-      const raw = await page.evaluate(() => {
+      // A page caught mid-navigation can leave evaluate pending for good.
+      const raw = await withTimeout(page.evaluate(() => {
         const keys = [
           "token",
           "__token",
@@ -263,7 +280,7 @@ export class QwenBrowserBridge {
           if (value?.startsWith("eyJ")) return value;
         }
         return null;
-      });
+      }), TOKEN_READ_TIMEOUT_MS, "readToken");
       return raw ?? undefined;
     } catch (err) {
       blog.warn(`readToken failed: ${errToString(err)}`);
