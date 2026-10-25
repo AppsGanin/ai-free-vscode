@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-free-ai",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Qwen, DeepSeek, Kimi and Z.ai web chats as DeepSeek Harness model providers, signed in through your own browser account",
   "license": "MIT",
   "author": "AppsGanin",
