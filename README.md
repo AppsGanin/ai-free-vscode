@@ -27,6 +27,7 @@
 - ✅ "Fix with AI" Quick Fix on errors/warnings, with a diff preview
 - ✅ Add your own OpenAI-compatible endpoints (Ollama, LM Studio, any gateway)
 - ✅ One settings page for everything: `AI Free VSCode — Open Settings`
+- ✅ The same providers in [DeepSeek Harness](#deepseek-harness-plugin) too, as the `dsh-plugin-free-ai` plugin
 
 Only models from providers you are signed into appear in the picker — no
 dead entries that fail on use.
@@ -237,6 +238,21 @@ To sign out:
 To check auth status:
 
 - `AI Free VSCode — Status`
+
+## DeepSeek Harness plugin
+
+The same providers also work in [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`), DeepSeek's open-source agent harness, through the [`dsh-plugin-free-ai`](https://www.npmjs.com/package/dsh-plugin-free-ai) plugin. It lives in [`dsh-plugin/`](dsh-plugin) and shares this extension's provider code.
+
+```sh
+npx @deepseek-ai/dsh plugin --profile web add dsh-plugin-free-ai
+npx @deepseek-ai/dsh web
+```
+
+- Model routes: `qwen-web`, `deepseek-web`, `kimi-web`, `zai-web`; pick one in the model selector or set it as `agent-default-model`.
+- The first request to a provider opens its sign-in window; `/free-ai status`, `/free-ai login <provider>` and `/free-ai logout <provider>` in an open session manage the sign-ins.
+- The plugin keeps its own sign-ins and browser profiles under `~/.ai-free-vscode/dsh`, so it runs alongside VS Code.
+
+Requirements, configuration and the model list: [dsh-plugin/README.md](dsh-plugin/README.md). The same [Important notice](#important-notice) applies.
 
 ## Editor features
 
