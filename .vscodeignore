@@ -26,3 +26,6 @@ vitest.config.ts
 
 # Плагин DeepSeek Harness — отдельный npm-пакет
 dsh-plugin/**
+
+# Локальная память ассистента — не для пакета
+.remember/**
